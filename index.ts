@@ -27,6 +27,9 @@ const extractor = await pipeline(
   "Xenova/all-MiniLM-L6-v2"
 );
 
+const escape = (str: string) =>
+  str.replace(/[\\'"]/g, "\\$&").replace(/[\n\r]/g, "\\n");
+
 @register("openai")
 export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
   toJSON(): object {
@@ -147,41 +150,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 const getNotes = async () => {
   const notes = await runJxa(`
     const app = Application('Notes');
-app.includeStandardAdditions = true;
-const notes = Array.from(app.notes());
-const titles = notes.map(note => note.properties().name);
-return titles;
+    app.includeStandardAdditions = true;
+    return Array.from(app.notes()).map(note => note.properties().name);
   `);
-
-  return notes as string[];
+  return (notes as string[]).map(escape);
 };
 
 const getNoteDetailsByTitle = async (title: string) => {
-  const note = await runJxa(
-    `const app = Application('Notes');
-    const title = "${title}"
-    
-    try {
-        const note = app.notes.whose({name: title})[0];
-        
-        const noteInfo = {
-            title: note.name(),
-            content: note.body(),
-            creation_date: note.creationDate().toLocaleString(),
-            modification_date: note.modificationDate().toLocaleString()
-        };
-        
-        return JSON.stringify(noteInfo);
-    } catch (error) {
-        return "{}";
-    }`
-  );
-
-  return JSON.parse(note as string) as {
-    title: string;
-    content: string;
-    creation_date: string;
-    modification_date: string;
+  const note = await runJxa(`
+    const app = Application('Notes');
+    const note = app.notes.whose({name: "${escape(title)}"})[0];
+    return JSON.stringify({
+      title: note.name(),
+      content: note.body(),
+      creation_date: note.creationDate().toLocaleString(),
+      modification_date: note.modificationDate().toLocaleString()
+    });
+  `);
+  const parsed = JSON.parse(note as string);
+  return {
+    ...parsed,
+    title: escape(parsed.title),
+    content: escape(parsed.content),
   };
 };
 
@@ -192,6 +182,7 @@ export const indexNotes = async (notesTable: any) => {
   const notesDetails = await Promise.all(
     allNotes.map((note) => {
       try {
+        // Note title is already escaped from getNotes()
         return getNoteDetailsByTitle(note);
       } catch (error) {
         report += `Error getting note details for ${note}: ${error.message}\n`;
@@ -206,7 +197,8 @@ export const indexNotes = async (notesTable: any) => {
       try {
         return {
           ...node,
-          content: turndown(node.content || ""), // this sometimes fails
+          // Content is already escaped from getNoteDetailsByTitle()
+          content: turndown(node.content || ""),
         };
       } catch (error) {
         return node;
@@ -215,7 +207,7 @@ export const indexNotes = async (notesTable: any) => {
     .map((note, index) => ({
       id: index.toString(),
       title: note.title,
-      content: note.content, // turndown(note.content || ""),
+      content: note.content,
       creation_date: note.creation_date,
       modification_date: note.modification_date,
     }));
@@ -251,26 +243,13 @@ export const createNotesTable = async (overrideName?: string) => {
   return { notesTable, time: performance.now() - start };
 };
 
-const createNote = async (title: string, content: string) => {
-  // Escape special characters and convert newlines to \n
-  const escapedTitle = title.replace(/[\\'"]/g, "\\$&");
-  const escapedContent = content
-    .replace(/[\\'"]/g, "\\$&")
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "");
-
-  await runJxa(`
+const createNote = async (title: string, content: string) =>
+  runJxa(`
     const app = Application('Notes');
-    const note = app.make({new: 'note', withProperties: {
-      name: "${escapedTitle}",
-      body: "${escapedContent}"
+    return app.make({new: 'note', withProperties: {
+      name: "${escape(title)}", body: "${escape(content)}"
     }});
-    
-    return true
   `);
-
-  return true;
-};
 
 // Handle tool execution
 server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
