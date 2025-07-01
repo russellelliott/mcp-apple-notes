@@ -18,7 +18,7 @@ import {
 import { type Float, Float32, Utf8 } from "apache-arrow";
 import { pipeline } from "@huggingface/transformers";
 
-const { turndown } = new TurndownService();
+const turndown = new TurndownService();
 const db = await lancedb.connect(
   path.join(os.homedir(), ".mcp-apple-notes", "data")
 );
@@ -293,77 +293,110 @@ export const indexNotes = async (
     allNotes = [...allNotes, ...batch.titles];
     console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
     
-    const batchResults = await Promise.all(
-      batch.titles.map(async (note) => {
+    // Process notes sequentially instead of in parallel to avoid overwhelming Apple Notes
+    const batchResults = [];
+    for (let index = 0; index < batch.titles.length; index++) {
+      const note = batch.titles[index];
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 120000); // Increased to 2 minutes
+        
         try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 30000);
+          console.log(`   🔍 Processing note ${index + 1}/${batch.titles.length}: "${note}"`);
+          const result = await Promise.race([
+            deps.getNoteDetailsByTitle(note),
+            new Promise((_, reject) => {
+              controller.signal.addEventListener('abort', () => 
+                reject(new Error('Note processing timed out after 120s'))
+              );
+            })
+          ]);
           
-          try {
-            const result = await Promise.race([
-              deps.getNoteDetailsByTitle(note),
-              new Promise((_, reject) => {
-                controller.signal.addEventListener('abort', () => 
-                  reject(new Error('Note processing timed out after 30s'))
-                );
-              })
-            ]);
-            
-            clearTimeout(timeout);
-            processed++;
-            successful++;
-            
-            if (processed % 10 === 0 || processed === batch.progress.total) {
-              const progress = ((processed / batch.progress.total) * 100).toFixed(1);
-              console.log(`   Progress: ${processed}/${batch.progress.total} notes (${progress}%) | ✅ ${successful} | ❌ ${failed}`);
-            }
-            
-            return result;
-          } catch (error) {
-            clearTimeout(timeout);
-            throw error;
+          clearTimeout(timeout);
+          processed++;
+          successful++;
+          
+          // Debug: Log the result structure
+          console.log(`   ✅ Note "${note}" result:`, {
+            hasTitle: !!result.title,
+            titleLength: result.title?.length || 0,
+            hasContent: !!result.content,
+            contentLength: result.content?.length || 0,
+            hasCreationDate: !!result.creation_date,
+            hasModificationDate: !!result.modification_date
+          });
+          
+          if (processed % 10 === 0 || processed === batch.progress.total) {
+            const progress = ((processed / batch.progress.total) * 100).toFixed(1);
+            console.log(`   Progress: ${processed}/${batch.progress.total} notes (${progress}%) | ✅ ${successful} | ❌ ${failed}`);
           }
+          
+          batchResults.push(result);
         } catch (error) {
-          failed++;
-          report += `Error processing note "${note}": ${error.message}\n`;
-          return {} as any;
+          clearTimeout(timeout);
+          throw error;
         }
-      })
-    );
+      } catch (error) {
+        failed++;
+        console.log(`   ❌ Failed to process note "${note}": ${error.message}`);
+        report += `Error processing note "${note}": ${error.message}\n`;
+        batchResults.push({} as any);
+      }
+      
+      // Add a small delay between notes to be gentle on Apple Notes
+      if (index < batch.titles.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
 
     console.log("📥 Converting batch to markdown format...");
-    const batchChunks = batchResults
-      .filter((n) => n.title)
-      .map((node) => {
+    
+    // Debug: Log filtering step
+    const notesWithTitle = batchResults.filter((n) => n.title);
+    console.log(`   🔍 After title filter: ${batchResults.length} -> ${notesWithTitle.length} notes`);
+    
+    const batchChunks = notesWithTitle
+      .map((node, index) => {
         try {
-          return {
+          console.log(`   🔄 Converting note "${node.title}" to markdown...`);
+          const converted = {
             ...node,
-            content: turndown(node.content || ""),
+            content: turndown.turndown(node.content || ""),
           };
+          console.log(`   ✅ Converted note "${node.title}" successfully`);
+          return converted;
         } catch (error) {
+          console.log(`   ❌ Error converting note "${node.title}" to markdown: ${error.message}`);
           report += `Error converting note "${node.title}" to markdown: ${error.message}\n`;
           return node;
         }
       })
       .map((note, index) => ({
-        id: (processed - batch.titles.length + index).toString(),
         title: note.title,
         content: note.content,
         creation_date: note.creation_date,
         modification_date: note.modification_date,
-        // Remove vector field from the data we're adding
-        // vector: undefined
       }));
 
       console.log(`   📊 Batch stats: ${batch.titles.length} requested, ${batchResults.length} processed, ${batchChunks.length} valid`);
       console.log(`   📊 Failed in this batch: ${batch.titles.length - batchResults.filter(r => r.title).length}`);
-
+      
+      // Debug: Log sample of what we're getting
+      if (batchChunks.length > 0) {
+        console.log(`   📋 Sample valid note:`, {
+          title: batchChunks[0].title,
+          contentPreview: batchChunks[0].content?.substring(0, 100) + "...",
+          hasCreationDate: !!batchChunks[0].creation_date,
+          hasModificationDate: !!batchChunks[0].modification_date
+        });
+      }
 
     if (batchChunks.length > 0) {
       console.log(`💾 Adding batch to database (${batchChunks.length} notes)...`);
       try {
         await notesTable.add(batchChunks);
       } catch (error) {
+        console.log(`   ❌ Database error: ${error.message}`);
         report += `Error adding batch to database: ${error.message}\n`;
         failed += batchChunks.length;
         successful -= batchChunks.length;
