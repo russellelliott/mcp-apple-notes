@@ -11,7 +11,8 @@
     "build": "bun build index.ts --outdir dist --target node",
     "start": "bun index.ts",
     "purge-db": "rm -rf ~/.mcp-apple-notes",
-    "test": "npx tsx index.test.ts"
+    "test": "npx tsx index.test.ts",
+    "index-notes": "bun cli.ts"
   },
   "exports": {
     ".": "./index.ts"
@@ -19,14 +20,18 @@
   "dependencies": {
     "@ai-sdk/openai": "^1.0.8",
     "@huggingface/transformers": "^3.1.2",
-    "@lancedb/lancedb": "^0.14.0",
+    "@lancedb/lancedb": "^0.21.0",
+    "@lancedb/lancedb-darwin-arm64": "^0.21.0",
     "@langchain/textsplitters": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.0.3",
+    "esbuild": "0.25.5",
     "run-jxa": "^3.0.0",
     "turndown": "^7.2.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/turndown": "^5.0.5"
+    "@esbuild/darwin-arm64": "^0.25.5",
+    "@types/turndown": "^5.0.5",
+    "esbuild-wasm": "^0.25.5"
   }
 }
