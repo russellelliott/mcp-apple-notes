@@ -25,6 +25,7 @@ async function main() {
     }
     
     console.log("\n✨ Notes are now ready for semantic search!");
+    process.exit(0);
   } catch (error) {
     console.error("\n❌ Error while indexing notes:", error);
     process.exit(1);
