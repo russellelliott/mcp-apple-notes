@@ -89,8 +89,22 @@ tail -n 50 -f ~/Library/Logs/Claude/mcp.log
 
 ## Todos
 
-- [ ] Apple notes are returned in the HTML format. We should turn them to Markdown and embed that
+- [x] Apple notes are returned in the HTML format. We should turn them to Markdown and embed that
 - [ ] Chunk source content using recursive text splitter or markdown text splitter
 - [ ] Add an option to use custom embeddings model
 - [ ] More control over DB - purge, custom queries, etc.
 - [x] Storing notes in Notes via Claude
+
+## References
+Pull request with batching (used much of that as a baseline, modified title escapes to help with my notes)
+do `bun run index-notes` this branch does batching
+https://github.com/RafalWilinski/mcp-apple-notes/pull/3
+
+```bash
+=== Indexing Complete ===
+📊 Stats:
+• Total notes found: 14012
+• Successfully indexed: 13983 notes
+• Failed to process: 29 notes
+• Time taken: 35550.16 seconds
+```
