@@ -123,3 +123,19 @@ results from initial
 - markdown library (`turndown`) caused weird whitespace and formatting. iterating on this, i decided to convert it to plain text instead.
 - to save time, starting off by indexing 1000 notes
 - improved note batching and parellel processing
+
+results from that change
+
+```bash
+=== Indexing Complete ===
+📊 Stats:
+• Total notes found: 1000
+• Successfully indexed: 1000 notes
+• Failed to process: 0 notes
+• Time taken: 2176.45 seconds
+```
+
+```
+2176.45 seconds ÷ 3600 seconds/hour ≈ 0.60457 hours (~36.27 minutes)
+1000 notes ÷ 2176.45 seconds ≈ 0.4594 notes/second
+```
