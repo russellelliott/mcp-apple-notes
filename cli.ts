@@ -1,7 +1,12 @@
 #!/usr/bin/env bun
-import { createNotesTable, indexNotes } from "./index.js";
+import { createNotesTable, indexNotes, indexNotesOptimized } from "./index.js";
+  
 
 async function main() {
+  const args = process.argv.slice(2);
+  const maxNotesArg = args.find(arg => arg.startsWith('--max='));
+  const maxNotes = maxNotesArg ? parseInt(maxNotesArg.split('=')[1]) : undefined;
+
   console.log("🚀 Starting notes indexing process...\n");
   
   try {
@@ -10,7 +15,7 @@ async function main() {
     console.log(`✅ Database setup complete (${(setupTime / 1000).toFixed(2)}s)\n`);
     
     console.log("📝 Fetching notes from Apple Notes...");
-    const { chunks, time, allNotes, failed, report } = await indexNotes(notesTable);
+    const { chunks, time, allNotes, failed, report } = await indexNotesOptimized(notesTable, maxNotes);
     
     console.log("\n=== Indexing Complete ===");
     console.log(`📊 Stats:`);

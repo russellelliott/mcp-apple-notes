@@ -9,7 +9,7 @@ import * as lancedb from "@lancedb/lancedb";
 import { runJxa } from "run-jxa";
 import path from "node:path";
 import os from "node:os";
-import TurndownService from "turndown";
+// Remove TurndownService import
 import {
   EmbeddingFunction,
   LanceSchema,
@@ -18,13 +18,15 @@ import {
 import { type Float, Float32, Utf8 } from "apache-arrow";
 import { pipeline } from "@huggingface/transformers";
 
-const turndown = new TurndownService();
+// Remove the turndown instance
 const db = await lancedb.connect(
   path.join(os.homedir(), ".mcp-apple-notes", "data")
 );
+
+// Update to better embedding model
 const extractor = await pipeline(
   "feature-extraction",
-  "Xenova/all-MiniLM-L6-v2"
+  "Xenova/bge-small-en-v1.5" // Better model for semantic search
 );
 
 @register("openai")
@@ -33,25 +35,104 @@ export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
     return {};
   }
   ndims() {
-    return 384;
+    return 384; // bge-small-en-v1.5 uses 384 dimensions
   }
   embeddingDataType(): Float {
     return new Float32();
   }
+  
+  // Clean and preprocess text for better embeddings
+  private cleanText(text: string): string {
+    return text
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .replace(/[^\w\s\-.,!?;:()\[\]{}'"]/g, ' ') // Keep basic punctuation
+      .trim()
+  }
+  
   async computeQueryEmbeddings(data: string) {
-    const output = await extractor(data, { pooling: "mean" });
+    const cleanedData = this.cleanText(data);
+    const output = await extractor(cleanedData, { 
+      pooling: "mean", 
+      normalize: true // Critical for proper similarity calculation
+    });
     return output.data as number[];
   }
+  
   async computeSourceEmbeddings(data: string[]) {
     return await Promise.all(
       data.map(async (item) => {
-        const output = await extractor(item, { pooling: "mean" });
-
+        const cleanedItem = this.cleanText(item);
+        const output = await extractor(cleanedItem, { 
+          pooling: "mean", 
+          normalize: true // Critical for proper similarity calculation
+        });
         return output.data as number[];
       })
     );
   }
 }
+
+
+
+
+//convert html to plaintext
+// Replace the HTML to text conversion function
+const htmlToPlainText = (html: string): string => {
+  if (!html) return "";
+  
+  return html
+    // Remove script and style elements completely
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    
+    // Convert common HTML elements to readable text
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/h[1-6]>/gi, '\n\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/tr>/gi, '\n')
+    .replace(/<\/td>/gi, ' | ')
+    
+    // Handle lists
+    .replace(/<ul[^>]*>/gi, '\n')
+    .replace(/<\/ul>/gi, '\n')
+    .replace(/<ol[^>]*>/gi, '\n')
+    .replace(/<\/ol>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '• ')
+    
+    // Handle headers - preserve their content but make them readable
+    .replace(/<h1[^>]*>(.*?)<\/h1>/gi, '\n\n$1\n' + '='.repeat(50) + '\n')
+    .replace(/<h2[^>]*>(.*?)<\/h2>/gi, '\n\n$1\n' + '-'.repeat(30) + '\n')
+    .replace(/<h3[^>]*>(.*?)<\/h3>/gi, '\n\n$1\n')
+    .replace(/<h[4-6][^>]*>(.*?)<\/h[4-6]>/gi, '\n\n$1\n')
+    
+    // Handle emphasis
+    .replace(/<strong[^>]*>(.*?)<\/strong>/gi, '**$1**')
+    .replace(/<b[^>]*>(.*?)<\/b>/gi, '**$1**')
+    .replace(/<em[^>]*>(.*?)<\/em>/gi, '*$1*')
+    .replace(/<i[^>]*>(.*?)<\/i>/gi, '*$1*')
+    
+    // Handle links
+    .replace(/<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, '$2 ($1)')
+    
+    // Remove all remaining HTML tags
+    .replace(/<[^>]*>/g, '')
+    
+    // Clean up entities
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&[a-zA-Z]+;/g, '') // Remove other entities
+    
+    // Clean up whitespace
+    .replace(/\n\s*\n\s*\n/g, '\n\n') // Max 2 consecutive newlines
+    .replace(/[ \t]+/g, ' ') // Multiple spaces/tabs to single space
+    .trim();
+};
 
 const func = new OnDeviceEmbeddingFunction();
 
@@ -156,38 +237,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
-const getNotes = async function* () {
+const getNotes = async function* (maxNotes?: number) {
   console.log("   Requesting notes list from Apple Notes...");
   try {
     const BATCH_SIZE = 25;
     let startIndex = 1;
     let hasMore = true;
 
-    // First get the total count
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000); //timdesrochers
+    // Get total count or use the limit
+    let totalCount: number;
+    
+    if (maxNotes) {
+      totalCount = maxNotes;
+      console.log(`   🎯 Using subset limit: ${totalCount} notes`);
+    } else {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120000);
 
-    const totalCount = await Promise.race([
-      runJxa(`
-        const app = Application('Notes');
-        app.includeStandardAdditions = true;
-        return app.notes().length;
-      `),
-      new Promise((_, reject) => {
-        controller.signal.addEventListener('abort', () => 
-          reject(new Error('Getting notes count timed out after 120s'))
-        );
-      })
-    ]) as number;
+      totalCount = await Promise.race([
+        runJxa(`
+          const app = Application('Notes');
+          app.includeStandardAdditions = true;
+          return app.notes().length;
+        `),
+        new Promise((_, reject) => {
+          controller.signal.addEventListener('abort', () => 
+            reject(new Error('Getting notes count timed out after 120s'))
+          );
+        })
+      ]) as number;
 
-    clearTimeout(timeout);
-    console.log(`   📊 Total notes found: ${totalCount}`);
+      clearTimeout(timeout);
+      console.log(`   📊 Total notes found: ${totalCount}`);
+    }
 
     while (hasMore) {
       console.log(`   Fetching batch of notes (${startIndex} to ${startIndex + BATCH_SIZE - 1})...`);
       
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 120000); //timdesrochers
+      const timeout = setTimeout(() => controller.abort(), 120000);
 
       const batchResult = await Promise.race([
         runJxa(`
@@ -272,8 +360,11 @@ const getNoteDetailsByTitle = async (title: string) => {
   };
 };
 
+// Update the indexNotes function to use the new converter
+// Update indexNotes to accept a limit parameter
 export const indexNotes = async (
-  notesTable: any, 
+  notesTable: any,
+  maxNotes?: number,
   deps = {
     getNotes,
     getNoteDetailsByTitle
@@ -286,20 +377,20 @@ export const indexNotes = async (
   let failed = 0;
   let allNotes: string[] = [];
   
-  console.log("📚 Getting and processing notes...");
+  console.log(`📚 Getting and processing notes${maxNotes ? ` (max: ${maxNotes})` : ''}...`);
   
-  // Use injected dependencies instead of globals
-  for await (const batch of deps.getNotes()) {
+  // Pass the maxNotes parameter to getNotes
+  for await (const batch of deps.getNotes(maxNotes)) {
     allNotes = [...allNotes, ...batch.titles];
     console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
     
-    // Process notes sequentially instead of in parallel to avoid overwhelming Apple Notes
+    // ... rest of the function stays the same
     const batchResults = [];
     for (let index = 0; index < batch.titles.length; index++) {
       const note = batch.titles[index];
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 120000); // Increased to 2 minutes
+        const timeout = setTimeout(() => controller.abort(), 120000);
         
         try {
           console.log(`   🔍 Processing note ${index + 1}/${batch.titles.length}: "${note}"`);
@@ -316,21 +407,7 @@ export const indexNotes = async (
           processed++;
           successful++;
           
-          // Debug: Log the result structure
-          console.log(`   ✅ Note "${note}" result:`, {
-            hasTitle: !!result.title,
-            titleLength: result.title?.length || 0,
-            hasContent: !!result.content,
-            contentLength: result.content?.length || 0,
-            hasCreationDate: !!result.creation_date,
-            hasModificationDate: !!result.modification_date
-          });
-          
-          if (processed % 10 === 0 || processed === batch.progress.total) {
-            const progress = ((processed / batch.progress.total) * 100).toFixed(1);
-            console.log(`   Progress: ${processed}/${batch.progress.total} notes (${progress}%) | ✅ ${successful} | ❌ ${failed}`);
-          }
-          
+          console.log(`   ✅ Note "${note}" processed successfully`);
           batchResults.push(result);
         } catch (error) {
           clearTimeout(timeout);
@@ -343,53 +420,161 @@ export const indexNotes = async (
         batchResults.push({} as any);
       }
       
-      // Add a small delay between notes to be gentle on Apple Notes
       if (index < batch.titles.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
 
-    console.log("📥 Converting batch to markdown format...");
+    console.log("📥 Converting batch to plain text format...");
     
-    // Debug: Log filtering step
     const notesWithTitle = batchResults.filter((n) => n.title);
     console.log(`   🔍 After title filter: ${batchResults.length} -> ${notesWithTitle.length} notes`);
     
     const batchChunks = notesWithTitle
-      .map((node, index) => {
+      .map((node) => {
         try {
-          console.log(`   🔄 Converting note "${node.title}" to markdown...`);
-          const converted = {
+          return {
             ...node,
-            content: turndown.turndown(node.content || ""),
+            content: htmlToPlainText(node.content || ""),
           };
-          console.log(`   ✅ Converted note "${node.title}" successfully`);
-          return converted;
         } catch (error) {
-          console.log(`   ❌ Error converting note "${node.title}" to markdown: ${error.message}`);
-          report += `Error converting note "${node.title}" to markdown: ${error.message}\n`;
-          return node;
+          console.log(`   ❌ Error converting note "${node.title}" to plain text: ${error.message}`);
+          return {
+            ...node,
+            content: node.content || ""
+          };
         }
       })
-      .map((note, index) => ({
+      .map((note) => ({
         title: note.title,
         content: note.content,
         creation_date: note.creation_date,
         modification_date: note.modification_date,
       }));
 
-      console.log(`   📊 Batch stats: ${batch.titles.length} requested, ${batchResults.length} processed, ${batchChunks.length} valid`);
-      console.log(`   📊 Failed in this batch: ${batch.titles.length - batchResults.filter(r => r.title).length}`);
-      
-      // Debug: Log sample of what we're getting
-      if (batchChunks.length > 0) {
-        console.log(`   📋 Sample valid note:`, {
-          title: batchChunks[0].title,
-          contentPreview: batchChunks[0].content?.substring(0, 100) + "...",
-          hasCreationDate: !!batchChunks[0].creation_date,
-          hasModificationDate: !!batchChunks[0].modification_date
-        });
+    if (batchChunks.length > 0) {
+      console.log(`💾 Adding batch to database (${batchChunks.length} notes)...`);
+      try {
+        await notesTable.add(batchChunks);
+      } catch (error) {
+        console.log(`   ❌ Database error: ${error.message}`);
+        report += `Error adding batch to database: ${error.message}\n`;
+        failed += batchChunks.length;
+        successful -= batchChunks.length;
       }
+    }
+  }
+
+  return {
+    chunks: successful,
+    failed,
+    report,
+    allNotes: allNotes.length,
+    time: performance.now() - start,
+  };
+};
+
+// Optimized version of indexNotes for faster processing
+export const indexNotesOptimized = async (
+  notesTable: any,
+  maxNotes?: number,
+  deps = {
+    getNotes,
+    getNoteDetailsByTitle
+  }
+) => {
+  const start = performance.now();
+  let report = "";
+  let processed = 0;
+  let successful = 0;
+  let failed = 0;
+  let allNotes: string[] = [];
+  
+  console.log(`📚 Getting and processing notes${maxNotes ? ` (max: ${maxNotes})` : ''}...`);
+  
+  for await (const batch of deps.getNotes(maxNotes)) {
+    allNotes = [...allNotes, ...batch.titles];
+    console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
+    
+    // Process notes in parallel batches of 5-10 instead of sequentially
+    const PARALLEL_BATCH_SIZE = 5;
+    const batchResults = [];
+    
+    for (let i = 0; i < batch.titles.length; i += PARALLEL_BATCH_SIZE) {
+      const parallelBatch = batch.titles.slice(i, i + PARALLEL_BATCH_SIZE);
+      console.log(`   🔍 Processing ${parallelBatch.length} notes in parallel...`);
+      
+      const parallelResults = await Promise.allSettled(
+        parallelBatch.map(async (note) => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 60000); // Reduced timeout
+          
+          try {
+            const result = await Promise.race([
+              deps.getNoteDetailsByTitle(note),
+              new Promise((_, reject) => {
+                controller.signal.addEventListener('abort', () => 
+                  reject(new Error('Note processing timed out after 60s'))
+                );
+              })
+            ]);
+            clearTimeout(timeout);
+            return result;
+          } catch (error) {
+            clearTimeout(timeout);
+            throw error;
+          }
+        })
+      );
+      
+      // Process results
+      parallelResults.forEach((result, idx) => {
+        const note = parallelBatch[idx];
+        if (result.status === 'fulfilled') {
+          processed++;
+          successful++;
+          batchResults.push(result.value);
+          console.log(`   ✅ Note "${note}" processed successfully`);
+        } else {
+          failed++;
+          console.log(`   ❌ Failed to process note "${note}": ${result.reason?.message}`);
+          report += `Error processing note "${note}": ${result.reason?.message}\n`;
+          batchResults.push({} as any);
+        }
+      });
+      
+      // Shorter delay between parallel batches
+      if (i + PARALLEL_BATCH_SIZE < batch.titles.length) {
+        await new Promise(resolve => setTimeout(resolve, 50)); // Reduced from 100ms
+      }
+    }
+
+    console.log("📥 Converting batch to plain text format...");
+    
+    const notesWithTitle = batchResults.filter((n) => n.title);
+    console.log(`   🔍 After title filter: ${batchResults.length} -> ${notesWithTitle.length} notes`);
+    
+    const batchChunks = notesWithTitle
+      .map((node) => {
+        try {
+          return {
+            ...node,
+            content: htmlToPlainText(node.content || ""),
+          };
+        } catch (error) {
+          console.log(`   ❌ Error converting note "${node.title}" to plain text: ${error.message}`);
+          return {
+            ...node,
+            content: node.content || ""
+          };
+        }
+      })
+      .map((note) => ({
+        title: note.title,
+        content: note.content,
+        creation_date: note.creation_date,
+        modification_date: note.modification_date,
+      }));
 
     if (batchChunks.length > 0) {
       console.log(`💾 Adding batch to database (${batchChunks.length} notes)...`);

@@ -89,7 +89,7 @@ tail -n 50 -f ~/Library/Logs/Claude/mcp.log
 
 ## Todos
 
-- [x] Apple notes are returned in the HTML format. We should turn them to Markdown and embed that
+- [ ] Apple notes are returned in the HTML format. We should turn them to Markdown and embed that
 - [ ] Chunk source content using recursive text splitter or markdown text splitter
 - [ ] Add an option to use custom embeddings model
 - [ ] More control over DB - purge, custom queries, etc.
@@ -108,3 +108,18 @@ https://github.com/RafalWilinski/mcp-apple-notes/pull/3
 • Failed to process: 29 notes
 • Time taken: 35550.16 seconds
 ```
+
+```
+35550.16 seconds ÷ 3600 seconds/hour ≈ 9.875 hours
+Average rate = 13983 notes ÷ 35550.16 seconds ≈ 0.3934 notes/second
+```
+
+results from initial
+- embedding model isn't very good
+  - doing a search query yields irrelevant results
+  - no normalization
+  - old model (`Xenova/all-MiniLM-L6-v2`) is very small. using `Xenova/all-MiniLM-L6-v2` instead
+- very poor text preprocessing
+- markdown library (`turndown`) caused weird whitespace and formatting. iterating on this, i decided to convert it to plain text instead.
+- to save time, starting off by indexing 1000 notes
+- improved note batching and parellel processing
