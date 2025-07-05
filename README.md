@@ -202,3 +202,7 @@ do 512 char substring for embeddings `.substring(0, 512)`
 - ✅ Performance rate consistent at ~0.45 notes/second
 
 **Next:** Test if 512-char limit improved search relevance with simple queries.
+
+
+new problem: how to deal with old notes?
+current implementation: when you do index, old notes remain
