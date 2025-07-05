@@ -41,13 +41,15 @@ export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
     return new Float32();
   }
   
-  // Clean and preprocess text for better embeddings
+  // Enhanced preprocessing for better semantic capture
   private cleanText(text: string): string {
     return text
+      .toLowerCase() // Normalize case
       .replace(/\s+/g, ' ') // Normalize whitespace
       .replace(/[^\w\s\-.,!?;:()\[\]{}'"]/g, ' ') // Keep basic punctuation
+      .replace(/\s+/g, ' ') // Clean up extra spaces
       .trim()
-      .substring(0, 512); // Limit size
+      .substring(0, 512); // Limit size for model
   }
   
   async computeQueryEmbeddings(data: string) {
@@ -812,104 +814,183 @@ const createTextResponse = (text: string) => ({
 });
 
 /**
- * Search for notes by title or content using both vector and FTS search.
- * The results are combined using RRF with proper similarity filtering
+ * Enhanced search relying purely on semantic content analysis
  */
-// Replace your complex searchAndCombineResults with this simple version
-// Replace your searchAndCombineResults function with this:
 export const searchAndCombineResults = async (
   notesTable: lancedb.Table,
   query: string,
   displayLimit = 5,
-  minCosineSimilarity = 0.1
+  minCosineSimilarity = 0.05 // Lower threshold for semantic discovery
 ) => {
-  console.log(`🔍 Searching for: "${query}"`);
+  console.log(`🔍 Semantic search for: "${query}"`);
   console.log(`📊 Table has ${await notesTable.countRows()} rows`);
   
-  // Get all notes from database
-  console.log(`\n🔍 Manually searching through all notes for: "${query}"`);
-  const allNotes = await notesTable.search("").limit(20000).toArray(); // Increased limit
+  const allResults = new Map(); // Use Map to avoid duplicates
   
-  // Create regex for word boundary matching (this is the key fix!)
+  // Strategy 1: Exact phrase matching
+  console.log(`\n1️⃣ Exact phrase search...`);
+  const allNotes = await notesTable.search("").limit(20000).toArray();
   const queryRegex = new RegExp(`\\b${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
   
-  const manualMatches = allNotes.filter(note => {
+  const exactMatches = allNotes.filter(note => {
     const titleMatch = queryRegex.test(note.title || '');
     const contentMatch = queryRegex.test(note.content || '');
     return titleMatch || contentMatch;
   });
   
-  console.log(`📋 Manual search found ${manualMatches.length} notes containing "${query}" as a whole word`);
+  exactMatches.forEach(note => {
+    allResults.set(note.title, {
+      ...note,
+      _relevance_score: 100,
+      _source: 'exact_match'
+    });
+  });
   
-  if (manualMatches.length > 0) {
-    console.log("✅ Content EXISTS in database. Here's what we found:");
-    manualMatches.slice(0, 5).forEach((note, idx) => {
-      console.log(`  ${idx + 1}. "${note.title}"`);
-      
-      // Find and show context for the match
-      const content = note.content || '';
-      const match = content.match(queryRegex);
-      if (match) {
-        const matchIndex = content.toLowerCase().indexOf(match[0].toLowerCase());
-        if (matchIndex >= 0) {
-          const start = Math.max(0, matchIndex - 50);
-          const end = Math.min(content.length, matchIndex + match[0].length + 50);
-          const snippet = content.substring(start, end);
-          console.log(`     Context: ...${snippet}...`);
-        }
-      }
-      
-      // Also check title matches
-      if (queryRegex.test(note.title || '')) {
-        console.log(`     Title contains: "${note.title}"`);
+  console.log(`📋 Exact matches: ${exactMatches.length}`);
+  
+  // Strategy 2: Fuzzy word matching (for partial matches)
+  console.log(`\n2️⃣ Fuzzy word matching...`);
+  const queryWords = query.toLowerCase().split(/\s+/).filter(word => word.length > 2);
+  
+  if (queryWords.length > 0) {
+    const fuzzyMatches = allNotes.filter(note => {
+      const text = `${note.title || ''} ${note.content || ''}`.toLowerCase();
+      return queryWords.some(word => {
+        // Check for partial word matches (e.g., "network" matches "networking")
+        const regex = new RegExp(`\\b\\w*${word}\\w*\\b`, 'gi');
+        return regex.test(text);
+      });
+    });
+    
+    fuzzyMatches.forEach(note => {
+      if (!allResults.has(note.title)) {
+        const text = `${note.title || ''} ${note.content || ''}`.toLowerCase();
+        const matchedWords = queryWords.filter(word => {
+          const regex = new RegExp(`\\b\\w*${word}\\w*\\b`, 'gi');
+          return regex.test(text);
+        });
+        
+        const score = (matchedWords.length / queryWords.length) * 75;
+        allResults.set(note.title, {
+          ...note,
+          _relevance_score: score,
+          _source: 'fuzzy_match'
+        });
       }
     });
     
-    // Return the accurate results
-    return manualMatches.slice(0, displayLimit).map(result => ({
-      title: result.title,
-      content: result.content?.substring(0, 300) + (result.content?.length > 300 ? '...' : ''),
-      creation_date: result.creation_date,
-      modification_date: result.modification_date,
-      _relevance_score: 100,
-      _source: 'manual'
-    }));
+    console.log(`📋 Fuzzy matches: ${fuzzyMatches.length}`);
   }
   
-  // FTS and vector search code stays the same...
-  console.log(`\n🔍 Testing FTS search for: "${query}"`);
+  // Strategy 3: FTS search
+  console.log(`\n3️⃣ Full-text search...`);
   try {
-    const ftsResults = await notesTable.search(query, "fts", "content").limit(10).toArray();
-    console.log(`📝 FTS found ${ftsResults.length} results`);
+    const ftsResults = await notesTable.search(query, "fts", "content").limit(20).toArray();
     
-    if (ftsResults.length > 0) {
-      ftsResults.slice(0, 3).forEach((result, idx) => {
-        console.log(`  FTS ${idx + 1}. "${result.title}"`);
-      });
-    }
+    ftsResults.forEach(note => {
+      if (!allResults.has(note.title)) {
+        allResults.set(note.title, {
+          ...note,
+          _relevance_score: 65,
+          _source: 'fts'
+        });
+      }
+    });
+    
+    console.log(`📝 FTS results: ${ftsResults.length}`);
   } catch (error) {
     console.log(`❌ FTS Error: ${error.message}`);
   }
   
-  console.log(`\n🔍 Testing vector search for: "${query}"`);
+  // Strategy 4: Vector search with adaptive threshold
+  console.log(`\n4️⃣ Vector semantic search...`);
   try {
-    const vectorResults = await notesTable.search(query, "vector").limit(10).toArray();
-    console.log(`🎯 Vector found ${vectorResults.length} results`);
+    const vectorResults = await notesTable.search(query, "vector").limit(30).toArray();
     
     if (vectorResults.length > 0) {
-      console.log(`📏 Vector distances: ${vectorResults.slice(0, 5).map(r => r._distance?.toFixed(3)).join(', ')}`);
-      
-      vectorResults.slice(0, 3).forEach((result, idx) => {
-        const distance = result._distance || 0;
-        const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
-        console.log(`  Vector ${idx + 1}. "${result.title}" (similarity: ${cosineSimilarity.toFixed(3)})`);
+      // Calculate dynamic similarity threshold based on result distribution
+      const similarities = vectorResults.map(note => {
+        const distance = note._distance || 0;
+        return Math.max(0, 1 - (distance * distance / 2));
       });
+      
+      // Use median similarity as adaptive threshold, but not below minimum
+      const sortedSimilarities = similarities.sort((a, b) => b - a);
+      const dynamicThreshold = Math.max(
+        minCosineSimilarity,
+        sortedSimilarities[Math.floor(sortedSimilarities.length * 0.7)] || minCosineSimilarity
+      );
+      
+      console.log(`📏 Similarities range: ${similarities[0]?.toFixed(3)} to ${similarities[similarities.length-1]?.toFixed(3)}`);
+      console.log(`🎯 Using dynamic threshold: ${dynamicThreshold.toFixed(3)}`);
+      
+      vectorResults.forEach(note => {
+        const distance = note._distance || 0;
+        const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
+        
+        if (cosineSimilarity > dynamicThreshold) {
+          if (!allResults.has(note.title)) {
+            allResults.set(note.title, {
+              ...note,
+              _relevance_score: cosineSimilarity * 60,
+              _source: 'vector_semantic'
+            });
+          }
+        }
+      });
+      
+      console.log(`🎯 Vector semantic results: ${vectorResults.filter(note => {
+        const distance = note._distance || 0;
+        const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
+        return cosineSimilarity > dynamicThreshold;
+      }).length}`);
     }
   } catch (error) {
     console.log(`❌ Vector Error: ${error.message}`);
   }
   
-  return [];
+  // Strategy 5: Substring search as fallback
+  console.log(`\n5️⃣ Substring search (fallback)...`);
+  if (allResults.size === 0) {
+    const substringMatches = allNotes.filter(note => {
+      const text = `${note.title || ''} ${note.content || ''}`.toLowerCase();
+      return text.includes(query.toLowerCase());
+    });
+    
+    substringMatches.forEach(note => {
+      if (!allResults.has(note.title)) {
+        allResults.set(note.title, {
+          ...note,
+          _relevance_score: 30,
+          _source: 'substring'
+        });
+      }
+    });
+    
+    console.log(`📋 Substring matches: ${substringMatches.length}`);
+  }
+  
+  // Combine and rank results
+  const combinedResults = Array.from(allResults.values())
+    .sort((a, b) => b._relevance_score - a._relevance_score)
+    .slice(0, displayLimit);
+  
+  console.log(`\n📊 Final results: ${combinedResults.length} notes (from ${allResults.size} total matches)`);
+  
+  if (combinedResults.length > 0) {
+    combinedResults.forEach((result, idx) => {
+      console.log(`  ${idx + 1}. "${result.title}" (score: ${result._relevance_score.toFixed(1)}, source: ${result._source})`);
+    });
+  }
+  
+  return combinedResults.map(result => ({
+    title: result.title,
+    content: result.content?.substring(0, 300) + (result.content?.length > 300 ? '...' : ''),
+    creation_date: result.creation_date,
+    modification_date: result.modification_date,
+    _relevance_score: result._relevance_score,
+    _source: result._source
+  }));
 };
 
 const CreateNoteSchema = z.object({
