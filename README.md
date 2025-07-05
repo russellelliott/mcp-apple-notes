@@ -206,3 +206,26 @@ do 512 char substring for embeddings `.substring(0, 512)`
 
 new problem: how to deal with old notes?
 current implementation: when you do index, old notes remain
+
+
+added system to check if notes modified or not. skips over ones that are unchanged
+
+
+The key improvements include:
+
+Smart Table Creation: The createNotesTableSmart function supports both fresh rebuilds and incremental updates
+Change Detection: Compares modification dates to only process changed notes
+Efficient Processing: Skips unchanged notes, dramatically reducing processing time for large collections
+Better CLI: Supports `--mode=fresh` or `--mode=incremental` and `--max=N` arguments
+Detailed Stats: Shows exactly what was added, updated, or skipped
+
+```
+=== Indexing Complete ===
+📊 Stats:
+• Total processed: 100 notes
+• New notes added: 1
+• Notes updated: 12
+• Notes skipped (unchanged): 87
+• Failed: 0 notes
+• Time taken: 222.63 seconds
+```

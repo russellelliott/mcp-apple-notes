@@ -488,48 +488,271 @@ export const indexNotes = async (
   };
 };
 
-export const createNotesTable = async (overrideName?: string) => {
-  const start = performance.now();
-  
-  // Create a fresh table
-  const notesTable = await db.createEmptyTable(
-    overrideName || "notes",
-    notesTableSchema,
-    {
-      mode: "create",
-      existOk: true,
+// Helper function to create FTS index
+const createFTSIndex = async (notesTable: any) => {
+  try {
+    const indices = await notesTable.listIndices();
+    if (!indices.find((index) => index.name === "content_idx")) {
+      await notesTable.createIndex("content", {
+        config: lancedb.Index.fts(),
+        replace: true,
+      });
+      console.log(`✅ Created FTS index`);
     }
-  );
-
-  const indices = await notesTable.listIndices();
-  if (!indices.find((index) => index.name === "content_idx")) {
-    await notesTable.createIndex("content", {
-      config: lancedb.Index.fts(),
-      replace: true,
-    });
+  } catch (error) {
+    console.log(`⚠️ FTS index creation failed: ${error.message}`);
   }
-  return { notesTable, time: performance.now() - start };
 };
 
-const createNote = async (title: string, content: string) => {
-  // Escape special characters and convert newlines to \n
-  const escapedTitle = title.replace(/[\\'"]/g, "\\$&");
-  const escapedContent = content
-    .replace(/[\\'"]/g, "\\$&")
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "");
-
-  await runJxa(`
-    const app = Application('Notes');
-    const note = app.make({new: 'note', withProperties: {
-      name: "${escapedTitle}",
-      body: "${escapedContent}"
-    }});
+// Replace your createNotesTable function with this smart version:
+export const createNotesTableSmart = async (overrideName?: string, mode: 'fresh' | 'incremental' = 'incremental') => {
+  const start = performance.now();
+  const tableName = overrideName || "notes";
+  
+  if (mode === 'fresh') {
+    // Fresh start - drop and recreate
+    try {
+      await db.dropTable(tableName);
+      console.log(`🗑️ Dropped existing '${tableName}' table for fresh start`);
+    } catch (error) {
+      console.log(`ℹ️ No existing table to drop`);
+    }
     
-    return true
-  `);
+    const notesTable = await db.createEmptyTable(
+      tableName,
+      notesTableSchema,
+      { mode: "create", existOk: false }
+    );
+    
+    console.log(`✅ Created fresh '${tableName}' table`);
+    await createFTSIndex(notesTable);
+    return { notesTable, existingNotes: new Map(), time: performance.now() - start };
+  } else {
+    // Incremental mode - smart updates
+    let notesTable;
+    let existingNotes = new Map();
+    
+    try {
+      notesTable = await db.openTable(tableName);
+      console.log(`📂 Opened existing '${tableName}' table`);
+      
+      // Load existing notes for comparison
+      console.log(`🔍 Loading existing notes for deduplication...`);
+      const existing = await notesTable.search("").limit(50000).toArray();
+      
+      // Create map: title -> {modification_date, id}
+      existing.forEach(note => {
+        if (note.title) {
+          existingNotes.set(note.title, {
+            modification_date: note.modification_date,
+            // Store the row for potential deletion
+            row: note
+          });
+        }
+      });
+      
+      console.log(`📊 Found ${existingNotes.size} existing notes for comparison`);
+      
+    } catch (error) {
+      // Table doesn't exist, create it
+      notesTable = await db.createEmptyTable(
+        tableName,
+        notesTableSchema,
+        { mode: "create", existOk: false }
+      );
+      console.log(`✅ Created new '${tableName}' table`);
+    }
+    
+    await createFTSIndex(notesTable);
+    return { notesTable, existingNotes, time: performance.now() - start };
+  }
+};
 
-  return true;
+// Smart indexing with updates
+export const indexNotesIncremental = async (
+  notesTable: any,
+  existingNotes: Map<string, any>,
+  maxNotes?: number,
+  deps = { getNotes, getNoteDetailsByTitle }
+) => {
+  const start = performance.now();
+  let report = "";
+  let processed = 0;
+  let successful = 0;
+  let failed = 0;
+  let updated = 0;
+  let added = 0;
+  let skipped = 0;
+  let allNotes: string[] = [];
+  
+  console.log(`📚 Smart indexing${maxNotes ? ` (max: ${maxNotes})` : ''} with update detection...`);
+  
+  for await (const batch of deps.getNotes(maxNotes)) {
+    allNotes = [...allNotes, ...batch.titles];
+    console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
+    
+    // First pass: quick check which notes need processing
+    const notesToProcess = [];
+    const notesToSkip = [];
+    
+    for (const noteTitle of batch.titles) {
+      const existingNote = existingNotes.get(noteTitle);
+      if (!existingNote) {
+        notesToProcess.push({ title: noteTitle, reason: 'new' });
+      } else {
+        // For existing notes, we'll need to fetch details to check modification date
+        notesToProcess.push({ title: noteTitle, reason: 'check' });
+      }
+    }
+    
+    console.log(`   🎯 Quick scan: ${notesToProcess.length} notes need checking, ${notesToSkip.length} can be skipped immediately`);
+    
+    // Process in smaller parallel batches for better performance
+    const PARALLEL_BATCH_SIZE = 3; // Reduced for better stability
+    const notesToUpdate = [];
+    const notesToAdd = [];
+    
+    for (let i = 0; i < notesToProcess.length; i += PARALLEL_BATCH_SIZE) {
+      const parallelBatch = notesToProcess.slice(i, i + PARALLEL_BATCH_SIZE);
+      console.log(`   🔍 Processing parallel batch ${Math.floor(i/PARALLEL_BATCH_SIZE) + 1}/${Math.ceil(notesToProcess.length/PARALLEL_BATCH_SIZE)} (${parallelBatch.length} notes)`);
+      
+      const batchPromises = parallelBatch.map(async ({ title, reason }) => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 45000); // Reduced timeout
+        
+        try {
+          const result = await Promise.race([
+            deps.getNoteDetailsByTitle(title),
+            new Promise((_, reject) => {
+              controller.signal.addEventListener('abort', () => 
+                reject(new Error('Note processing timed out after 45s'))
+              );
+            })
+          ]);
+          clearTimeout(timeout);
+          return { success: true, data: result, title, reason };
+        } catch (error) {
+          clearTimeout(timeout);
+          return { success: false, error, title, reason };
+        }
+      });
+      
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      // Process results
+      batchResults.forEach((result, idx) => {
+        const { title, reason } = parallelBatch[idx];
+        
+        if (result.status === 'fulfilled' && result.value.success) {
+          const noteDetails = result.value.data;
+          processed++;
+          successful++;
+          
+          const existingNote = existingNotes.get(title);
+          
+          if (existingNote) {
+            // Check modification date
+            const existingModDate = new Date(existingNote.modification_date);
+            const currentModDate = new Date(noteDetails.modification_date);
+            
+            if (currentModDate > existingModDate) {
+              console.log(`     🔄 "${title}" was modified - will update`);
+              notesToUpdate.push(noteDetails);
+              updated++;
+            } else {
+              console.log(`     ⏭️ "${title}" unchanged - skipping`);
+              skipped++;
+            }
+          } else {
+            console.log(`     ✨ "${title}" is new - will add`);
+            notesToAdd.push(noteDetails);
+            added++;
+          }
+        } else {
+          failed++;
+          const error = result.status === 'fulfilled' ? result.value.error : result.reason;
+          console.log(`     ❌ Failed to process "${title}": ${error?.message || 'Unknown error'}`);
+          report += `Error processing note "${title}": ${error?.message || 'Unknown error'}\n`;
+        }
+      });
+      
+      // Shorter delay between parallel batches
+      if (i + PARALLEL_BATCH_SIZE < notesToProcess.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    
+    // Process updates and additions in one go
+    const allNotesToProcess = [...notesToUpdate, ...notesToAdd];
+    
+    if (allNotesToProcess.length > 0) {
+      console.log(`📥 Converting ${allNotesToProcess.length} notes to plain text...`);
+      
+      const batchChunks = allNotesToProcess
+        .map((node) => {
+          try {
+            return {
+              ...node,
+              content: htmlToPlainText(node.content || ""),
+            };
+          } catch (error) {
+            console.log(`     ⚠️ HTML conversion error for "${node.title}": ${error.message}`);
+            return {
+              ...node,
+              content: node.content || ""
+            };
+          }
+        })
+        .map((note) => ({
+          title: note.title,
+          content: note.content,
+          creation_date: note.creation_date,
+          modification_date: note.modification_date,
+        }));
+
+      console.log(`💾 Adding ${batchChunks.length} notes to database...`);
+      try {
+        await notesTable.add(batchChunks);
+        
+        // Update our existing notes map
+        batchChunks.forEach(note => {
+          existingNotes.set(note.title, {
+            modification_date: note.modification_date,
+            row: note
+          });
+        });
+        
+        console.log(`✅ Successfully added ${batchChunks.length} notes to database`);
+        
+      } catch (error) {
+        console.log(`   ❌ Database error: ${error.message}`);
+        report += `Error adding batch to database: ${error.message}\n`;
+        failed += batchChunks.length;
+        successful -= batchChunks.length;
+      }
+    } else {
+      console.log(`⏭️ No notes in this batch needed processing`);
+    }
+    
+    // Brief pause between batches
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+
+  return {
+    chunks: successful,
+    failed,
+    updated,
+    added,
+    skipped,
+    report,
+    allNotes: allNotes.length,
+    time: performance.now() - start,
+  };
+};
+
+export const createNotesTable = async (overrideName?: string) => {
+  // Use the smart version with incremental mode by default
+  return await createNotesTableSmart(overrideName, 'incremental');
 };
 
 // Handle tool execution
