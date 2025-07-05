@@ -262,3 +262,98 @@ Detailed Stats: Shows exactly what was added, updated, or skipped
 • Notes skipped (unchanged): 0
 • Failed: 0 notes
 • Time taken: 227.50 seconds
+
+// ...existing code...
+
+## Recent Improvements
+
+### Semantic Search & Chunking Enhancements
+
+**Better Embedding Model & Processing:**
+- ✅ Upgraded from `all-MiniLM-L6-v2` to `bge-small-en-v1.5` for improved semantic understanding
+- ✅ Added embedding normalization (`normalize: true`) for better similarity calculations
+- ✅ Replaced TurndownService with custom HTML-to-plaintext converter that preserves formatting
+- ✅ Enhanced text preprocessing with proper cleaning and tokenization
+
+**Smart Chunking System:**
+- ✅ Implemented intelligent text chunking with 400-token chunks and 50-token overlap
+- ✅ Preserves document structure by splitting on natural boundaries (paragraphs, sentences)
+- ✅ Handles edge cases with fallback chunking strategies
+- ✅ Each note can generate multiple searchable chunks for better retrieval
+
+**Incremental Indexing:**
+- ✅ Smart update detection - only processes modified notes
+- ✅ Compares modification dates to skip unchanged content
+- ✅ Dramatically faster re-indexing (87% of notes skipped in typical runs)
+- ✅ Fresh rebuild option available with `--mode=fresh`
+
+**Performance Optimizations:**
+- ✅ Parallel processing of notes (5 notes simultaneously)
+- ✅ Optimized batching with progress tracking
+- ✅ Reduced timeouts and delays for faster processing
+- ✅ Memory-efficient chunk creation and storage
+
+**Enhanced Search Capabilities:**
+- ✅ Multi-strategy search combining vector similarity, full-text search, and exact matching
+- ✅ Chunk-level search with note-level result aggregation
+- ✅ Relevance scoring and result ranking
+- ✅ Preview of matching chunk content in search results
+
+### CLI Improvements
+
+**New Command Line Interface:**
+```bash
+# Fresh rebuild of entire database
+bun run index-notes --mode=fresh
+
+# Incremental updates (default)
+bun run index-notes --mode=incremental
+
+# Limit processing to specific number of notes
+bun run index-notes --max=100
+
+# Combine options
+bun run index-notes --mode=fresh --max=500
+```
+
+**Better Progress Reporting:**
+- Real-time batch processing updates
+- Detailed statistics on new, updated, and skipped notes
+- Performance metrics and timing information
+- Error reporting with detailed failure logs
+
+### Performance Results
+
+**Before improvements:**
+- ~0.39 notes/second (9.9 hours for 14k notes)
+- Poor search relevance
+- Full re-processing on every run
+
+**After improvements:**
+- ~0.45 notes/second for new notes
+- 87% skip rate for unchanged notes on incremental runs
+- Significantly improved search quality with semantic chunking
+- ~3-4 minutes to process 100 notes (including chunking)
+
+## Troubleshooting
+
+// ...existing code...
+
+### Common Issues
+
+**Slow Initial Indexing:**
+- First-time indexing is slower due to embedding generation
+- Use `--max=100` to test with a subset of notes first
+- Subsequent runs are much faster with incremental updates
+
+**Search Not Finding Results:**
+- Ensure notes are indexed first: "Index my Apple Notes"
+- Try different search terms or phrases
+- Check that the embedding model downloaded correctly
+
+**Memory Issues:**
+- Large note collections may require chunking
+- The system automatically handles this with 400-token chunks
+- Consider using `--max=N` for very large collections
+
+// ...existing code...
