@@ -587,7 +587,11 @@ export const indexNotesIncremental = async (
   let skipped = 0;
   let allNotes: string[] = [];
   
+  const isFreshMode = existingNotes.size === 0;
   console.log(`📚 Smart indexing${maxNotes ? ` (max: ${maxNotes})` : ''} with update detection...`);
+  if (isFreshMode) {
+    console.log(`🆕 Fresh mode detected - all notes will be processed as new`);
+  }
   
   for await (const batch of deps.getNotes(maxNotes)) {
     allNotes = [...allNotes, ...batch.titles];
@@ -598,16 +602,21 @@ export const indexNotesIncremental = async (
     const notesToSkip = [];
     
     for (const noteTitle of batch.titles) {
-      const existingNote = existingNotes.get(noteTitle);
-      if (!existingNote) {
+      if (isFreshMode) {
+        // In fresh mode, process all notes as new
         notesToProcess.push({ title: noteTitle, reason: 'new' });
       } else {
-        // For existing notes, we'll need to fetch details to check modification date
-        notesToProcess.push({ title: noteTitle, reason: 'check' });
+        const existingNote = existingNotes.get(noteTitle);
+        if (!existingNote) {
+          notesToProcess.push({ title: noteTitle, reason: 'new' });
+        } else {
+          // For existing notes, we'll need to fetch details to check modification date
+          notesToProcess.push({ title: noteTitle, reason: 'check' });
+        }
       }
     }
     
-    console.log(`   🎯 Quick scan: ${notesToProcess.length} notes need checking, ${notesToSkip.length} can be skipped immediately`);
+    console.log(`   🎯 Quick scan: ${notesToProcess.length} notes need ${isFreshMode ? 'processing (fresh mode)' : 'checking'}, ${notesToSkip.length} can be skipped immediately`);
     
     // Process in smaller parallel batches for better performance
     const PARALLEL_BATCH_SIZE = 3; // Reduced for better stability
@@ -650,25 +659,32 @@ export const indexNotesIncremental = async (
           processed++;
           successful++;
           
-          const existingNote = existingNotes.get(title);
-          
-          if (existingNote) {
-            // Check modification date
-            const existingModDate = new Date(existingNote.modification_date);
-            const currentModDate = new Date(noteDetails.modification_date);
-            
-            if (currentModDate > existingModDate) {
-              console.log(`     🔄 "${title}" was modified - will update`);
-              notesToUpdate.push(noteDetails);
-              updated++;
-            } else {
-              console.log(`     ⏭️ "${title}" unchanged - skipping`);
-              skipped++;
-            }
-          } else {
-            console.log(`     ✨ "${title}" is new - will add`);
+          if (isFreshMode) {
+            // In fresh mode, treat all notes as new
+            console.log(`     ✨ "${title}" (fresh mode) - will add`);
             notesToAdd.push(noteDetails);
             added++;
+          } else {
+            const existingNote = existingNotes.get(title);
+            
+            if (existingNote) {
+              // Check modification date
+              const existingModDate = new Date(existingNote.modification_date);
+              const currentModDate = new Date(noteDetails.modification_date);
+              
+              if (currentModDate > existingModDate) {
+                console.log(`     🔄 "${title}" was modified - will update`);
+                notesToUpdate.push(noteDetails);
+                updated++;
+              } else {
+                console.log(`     ⏭️ "${title}" unchanged - skipping`);
+                skipped++;
+              }
+            } else {
+              console.log(`     ✨ "${title}" is new - will add`);
+              notesToAdd.push(noteDetails);
+              added++;
+            }
           }
         } else {
           failed++;
@@ -716,13 +732,15 @@ export const indexNotesIncremental = async (
       try {
         await notesTable.add(batchChunks);
         
-        // Update our existing notes map
-        batchChunks.forEach(note => {
-          existingNotes.set(note.title, {
-            modification_date: note.modification_date,
-            row: note
+        // Update our existing notes map (only relevant for incremental mode)
+        if (!isFreshMode) {
+          batchChunks.forEach(note => {
+            existingNotes.set(note.title, {
+              modification_date: note.modification_date,
+              row: note
+            });
           });
-        });
+        }
         
         console.log(`✅ Successfully added ${batchChunks.length} notes to database`);
         
