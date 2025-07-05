@@ -29,6 +29,89 @@ const extractor = await pipeline(
   "Xenova/bge-small-en-v1.5" // Better model for semantic search
 );
 
+// Get tokenizer from the model
+const tokenizer = extractor.tokenizer;
+
+// Chunking configuration
+const CHUNK_SIZE = 400; // tokens (留出余量给系统 tokens)
+const CHUNK_OVERLAP = 50; // tokens overlap between chunks
+const MAX_CHUNK_SIZE = 512; // hard limit for safety
+
+// Enhanced chunking function with token awareness
+const createChunks = async (text: string, maxTokens = CHUNK_SIZE, overlap = CHUNK_OVERLAP): Promise<string[]> => {
+  if (!text || text.trim().length === 0) {
+    return [''];
+  }
+  
+  try {
+    // Tokenize the full text
+    const tokens = await tokenizer(text);
+    const tokenIds = Array.from(tokens.input_ids.data);
+    
+    if (tokenIds.length <= maxTokens) {
+      // Text fits in one chunk
+      return [text];
+    }
+    
+    const chunks: string[] = [];
+    let start = 0;
+    
+    while (start < tokenIds.length) {
+      const end = Math.min(start + maxTokens, tokenIds.length);
+      const chunkTokens = tokenIds.slice(start, end);
+      
+      // Decode tokens back to text
+      const chunkText = tokenizer.decode(chunkTokens, { skip_special_tokens: true });
+      
+      // Clean up the chunk text
+      const cleanedChunk = chunkText.trim();
+      if (cleanedChunk.length > 0) {
+        chunks.push(cleanedChunk);
+      }
+      
+      // Move start position considering overlap
+      start = end - overlap;
+      
+      // Safety check to prevent infinite loop
+      if (start >= tokenIds.length - overlap) {
+        break;
+      }
+    }
+    
+    return chunks.length > 0 ? chunks : [text.substring(0, 1000)]; // Fallback
+  } catch (error) {
+    console.log(`⚠️ Tokenization error, falling back to character-based chunking: ${error.message}`);
+    
+    // Fallback to character-based chunking (approximately 4 chars per token)
+    const approxChunkSize = maxTokens * 4;
+    const approxOverlap = overlap * 4;
+    
+    if (text.length <= approxChunkSize) {
+      return [text];
+    }
+    
+    const chunks: string[] = [];
+    let start = 0;
+    
+    while (start < text.length) {
+      const end = Math.min(start + approxChunkSize, text.length);
+      const chunk = text.substring(start, end);
+      
+      if (chunk.trim().length > 0) {
+        chunks.push(chunk.trim());
+      }
+      
+      start = end - approxOverlap;
+      
+      if (start >= text.length - approxOverlap) {
+        break;
+      }
+    }
+    
+    return chunks.length > 0 ? chunks : [text.substring(0, 1000)];
+  }
+};
+
 @register("openai")
 export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
   toJSON(): object {
@@ -48,8 +131,7 @@ export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
       .replace(/\s+/g, ' ') // Normalize whitespace
       .replace(/[^\w\s\-.,!?;:()\[\]{}'"]/g, ' ') // Keep basic punctuation
       .replace(/\s+/g, ' ') // Clean up extra spaces
-      .trim()
-      .substring(0, 512); // Limit size for model
+      .trim();
   }
   
   async computeQueryEmbeddings(data: string) {
@@ -139,12 +221,16 @@ const htmlToPlainText = (html: string): string => {
 
 const func = new OnDeviceEmbeddingFunction();
 
+// Updated schema to include chunk information - fix the embedding field
 const notesTableSchema = LanceSchema({
-  title: func.sourceField(new Utf8()),
-  content: func.sourceField(new Utf8()),
-  creation_date: func.sourceField(new Utf8()),
-  modification_date: func.sourceField(new Utf8()),
-  vector: func.vectorField(),
+  title: new Utf8(), // Regular field, not for embedding
+  content: new Utf8(), // Regular field, not for embedding  
+  creation_date: new Utf8(), // Regular field
+  modification_date: new Utf8(), // Regular field
+  chunk_index: new Utf8(), // Regular field
+  total_chunks: new Utf8(), // Regular field
+  chunk_content: func.sourceField(new Utf8()), // This is the field that gets embedded
+  vector: func.vectorField(), // This stores the embeddings
 });
 
 const QueryNotesSchema = z.object({
@@ -223,19 +309,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["query"],
         },
       },
-      {
-        name: "create-note",
-        description:
-          "Create a new Apple Note with specified title and content. Must be in HTML format WITHOUT newlines",
-        inputSchema: {
-          type: "object",
-          properties: {
-            title: { type: "string" },
-            content: { type: "string" },
-          },
-          required: ["title", "content"],
-        },
-      },
+      // Remove create-note tool since it's not needed
     ],
   };
 });
@@ -380,15 +454,16 @@ export const indexNotes = async (
   let processed = 0;
   let successful = 0;
   let failed = 0;
+  let totalChunks = 0;
   let allNotes: string[] = [];
   
-  console.log(`📚 Getting and processing notes${maxNotes ? ` (max: ${maxNotes})` : ''}...`);
+  console.log(`📚 Getting and processing notes with chunking${maxNotes ? ` (max: ${maxNotes})` : ''}...`);
   
   for await (const batch of deps.getNotes(maxNotes)) {
     allNotes = [...allNotes, ...batch.titles];
     console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
     
-    // Process notes in parallel batches of 5-10 instead of sequentially
+    // Process notes in parallel batches
     const PARALLEL_BATCH_SIZE = 5;
     const batchResults = [];
     
@@ -399,7 +474,7 @@ export const indexNotes = async (
       const parallelResults = await Promise.allSettled(
         parallelBatch.map(async (note) => {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 60000); // Reduced timeout
+          const timeout = setTimeout(() => controller.abort(), 60000);
           
           try {
             const result = await Promise.race([
@@ -419,9 +494,11 @@ export const indexNotes = async (
         })
       );
       
-      // Process results
-      parallelResults.forEach((result, idx) => {
+      // Process results and create chunks
+      for (let idx = 0; idx < parallelResults.length; idx++) {
+        const result = parallelResults[idx];
         const note = parallelBatch[idx];
+        
         if (result.status === 'fulfilled') {
           processed++;
           successful++;
@@ -431,58 +508,70 @@ export const indexNotes = async (
           failed++;
           console.log(`   ❌ Failed to process note "${note}": ${result.reason?.message}`);
           report += `Error processing note "${note}": ${result.reason?.message}\n`;
-          batchResults.push({} as any);
         }
-      });
+      }
       
-      // Shorter delay between parallel batches
       if (i + PARALLEL_BATCH_SIZE < batch.titles.length) {
-        await new Promise(resolve => setTimeout(resolve, 50)); // Reduced from 100ms
+        await new Promise(resolve => setTimeout(resolve, 50));
       }
     }
 
-    console.log("📥 Converting batch to plain text format...");
+    console.log("📥 Converting batch to plain text and creating chunks...");
     
     const notesWithTitle = batchResults.filter((n) => n.title);
     console.log(`   🔍 After title filter: ${batchResults.length} -> ${notesWithTitle.length} notes`);
     
-    const batchChunks = notesWithTitle
-      .map((node) => {
-        try {
-          return {
-            ...node,
-            content: htmlToPlainText(node.content || ""),
-          };
-        } catch (error) {
-          console.log(`   ❌ Error converting note "${node.title}" to plain text: ${error.message}`);
-          return {
-            ...node,
-            content: node.content || ""
-          };
-        }
-      })
-      .map((note) => ({
-        title: note.title,
-        content: note.content,
-        creation_date: note.creation_date,
-        modification_date: note.modification_date,
-      }));
-
-    if (batchChunks.length > 0) {
-      console.log(`💾 Adding batch to database (${batchChunks.length} notes)...`);
+    const allChunks = [];
+    
+    for (const note of notesWithTitle) {
       try {
-        await notesTable.add(batchChunks);
+        const plainTextContent = htmlToPlainText(note.content || "");
+        const fullText = `${note.title}\n\n${plainTextContent}`;
+        
+        // Create chunks from the full text
+        const chunks = await createChunks(fullText);
+        console.log(`   📄 "${note.title}": ${chunks.length} chunks created`);
+        
+        // Create chunk records
+        chunks.forEach((chunkContent, index) => {
+          allChunks.push({
+            title: note.title,
+            content: plainTextContent, // Keep full content for reference
+            creation_date: note.creation_date,
+            modification_date: note.modification_date,
+            chunk_index: index.toString(),
+            total_chunks: chunks.length.toString(),
+            chunk_content: chunkContent, // This is what gets embedded
+          });
+        });
+        
+        totalChunks += chunks.length;
+        
+      } catch (error) {
+        console.log(`   ❌ Error processing note "${note.title}": ${error.message}`);
+        report += `Error processing note "${note.title}": ${error.message}\n`;
+        failed++;
+        successful--;
+      }
+    }
+
+    if (allChunks.length > 0) {
+      console.log(`💾 Adding ${allChunks.length} chunks to database...`);
+      try {
+        await notesTable.add(allChunks);
+        console.log(`✅ Successfully added ${allChunks.length} chunks from ${notesWithTitle.length} notes`);
       } catch (error) {
         console.log(`   ❌ Database error: ${error.message}`);
-        report += `Error adding batch to database: ${error.message}\n`;
-        failed += batchChunks.length;
-        successful -= batchChunks.length;
+        report += `Error adding chunks to database: ${error.message}\n`;
+        failed += notesWithTitle.length;
+        successful -= notesWithTitle.length;
       }
     }
   }
 
   return {
-    chunks: successful,
+    chunks: totalChunks,
+    notes: successful,
     failed,
     report,
     allNotes: allNotes.length,
@@ -490,16 +579,16 @@ export const indexNotes = async (
   };
 };
 
-// Helper function to create FTS index
+// Helper function to create FTS index on chunk_content
 const createFTSIndex = async (notesTable: any) => {
   try {
     const indices = await notesTable.listIndices();
-    if (!indices.find((index) => index.name === "content_idx")) {
-      await notesTable.createIndex("content", {
+    if (!indices.find((index) => index.name === "chunk_content_idx")) {
+      await notesTable.createIndex("chunk_content", {
         config: lancedb.Index.fts(),
         replace: true,
       });
-      console.log(`✅ Created FTS index`);
+      console.log(`✅ Created FTS index on chunk_content`);
     }
   } catch (error) {
     console.log(`⚠️ FTS index creation failed: ${error.message}`);
@@ -585,6 +674,7 @@ export const indexNotesIncremental = async (
   let updated = 0;
   let added = 0;
   let skipped = 0;
+  let totalChunks = 0;
   let allNotes: string[] = [];
   
   const isFreshMode = existingNotes.size === 0;
@@ -700,55 +790,73 @@ export const indexNotesIncremental = async (
       }
     }
     
-    // Process updates and additions in one go
+    // Process updates and additions - CREATE CHUNKS PROPERLY
     const allNotesToProcess = [...notesToUpdate, ...notesToAdd];
     
     if (allNotesToProcess.length > 0) {
-      console.log(`📥 Converting ${allNotesToProcess.length} notes to plain text...`);
+      console.log(`📥 Converting ${allNotesToProcess.length} notes to plain text and creating chunks...`);
       
-      const batchChunks = allNotesToProcess
-        .map((node) => {
-          try {
-            return {
-              ...node,
-              content: htmlToPlainText(node.content || ""),
-            };
-          } catch (error) {
-            console.log(`     ⚠️ HTML conversion error for "${node.title}": ${error.message}`);
-            return {
-              ...node,
-              content: node.content || ""
-            };
-          }
-        })
-        .map((note) => ({
-          title: note.title,
-          content: note.content,
-          creation_date: note.creation_date,
-          modification_date: note.modification_date,
-        }));
-
-      console.log(`💾 Adding ${batchChunks.length} notes to database...`);
-      try {
-        await notesTable.add(batchChunks);
-        
-        // Update our existing notes map (only relevant for incremental mode)
-        if (!isFreshMode) {
-          batchChunks.forEach(note => {
-            existingNotes.set(note.title, {
+      const allChunks = [];
+      
+      for (const note of allNotesToProcess) {
+        try {
+          const plainTextContent = htmlToPlainText(note.content || "");
+          const fullText = `${note.title}\n\n${plainTextContent}`;
+          
+          // Create chunks from the full text
+          const chunks = await createChunks(fullText);
+          console.log(`     📄 "${note.title}": ${chunks.length} chunks created`);
+          
+          // Create chunk records with chunk_content field
+          chunks.forEach((chunkContent, index) => {
+            allChunks.push({
+              title: note.title,
+              content: plainTextContent, // Keep full content for reference
+              creation_date: note.creation_date,
               modification_date: note.modification_date,
-              row: note
+              chunk_index: index.toString(),
+              total_chunks: chunks.length.toString(),
+              chunk_content: chunkContent, // This is what gets embedded - CRITICAL FIELD
             });
           });
+          
+          totalChunks += chunks.length;
+          
+        } catch (error) {
+          console.log(`     ⚠️ Error processing note "${note.title}": ${error.message}`);
+          report += `Error processing note "${note.title}": ${error.message}\n`;
+          failed++;
+          successful--;
         }
+      }
+
+      if (allChunks.length > 0) {
+        console.log(`💾 Adding ${allChunks.length} chunks to database...`);
         
-        console.log(`✅ Successfully added ${batchChunks.length} notes to database`);
+        // Debug: Log first chunk to verify structure
+        console.log(`🔍 Sample chunk structure:`, JSON.stringify(allChunks[0], null, 2));
         
-      } catch (error) {
-        console.log(`   ❌ Database error: ${error.message}`);
-        report += `Error adding batch to database: ${error.message}\n`;
-        failed += batchChunks.length;
-        successful -= batchChunks.length;
+        try {
+          await notesTable.add(allChunks);
+          
+          // Update our existing notes map (only relevant for incremental mode)
+          if (!isFreshMode) {
+            allNotesToProcess.forEach(note => {
+              existingNotes.set(note.title, {
+                modification_date: note.modification_date,
+                row: note
+              });
+            });
+          }
+          
+          console.log(`✅ Successfully added ${allChunks.length} chunks from ${allNotesToProcess.length} notes`);
+          
+        } catch (error) {
+          console.log(`   ❌ Database error: ${error.message}`);
+          report += `Error adding chunks to database: ${error.message}\n`;
+          failed += allNotesToProcess.length;
+          successful -= allNotesToProcess.length;
+        }
       }
     } else {
       console.log(`⏭️ No notes in this batch needed processing`);
@@ -759,7 +867,8 @@ export const indexNotesIncremental = async (
   }
 
   return {
-    chunks: successful,
+    chunks: totalChunks,
+    notes: successful,
     failed,
     updated,
     added,
@@ -782,31 +891,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
 
   try {
     if (name === "create-note") {
-      const { title, content } = CreateNoteSchema.parse(args);
-      await createNote(title, content);
-      return createTextResponse(`Created note "${title}" successfully.`);
+      // Remove createNote functionality since it's not needed
+      return createTextResponse(`Create note functionality not implemented.`);
     } else if (name === "list-notes") {
+      const totalChunks = await notesTable.countRows();
+      // Get unique note titles to count actual notes
+      const allChunks = await notesTable.search("").limit(50000).toArray();
+      const uniqueNotes = new Set(allChunks.map(chunk => chunk.title));
       return createTextResponse(
-        `There are ${await notesTable.countRows()} notes in your Apple Notes database.`
+        `There are ${uniqueNotes.size} notes (${totalChunks} chunks) in your Apple Notes database.`
       );
     } else if (name == "get-note") {
       try {
         const { title } = GetNoteSchema.parse(args);
         const note = await getNoteDetailsByTitle(title);
 
-        return createTextResponse(`${note}`);
+        return createTextResponse(`${JSON.stringify(note, null, 2)}`);
       } catch (error) {
         return createTextResponse(error.message);
       }
     } else if (name === "index-notes") {
-      const { time, chunks, report, allNotes } = await indexNotes(notesTable);
+      const { time, chunks, notes, report, allNotes } = await indexNotes(notesTable);
       return createTextResponse(
-        `Indexed ${chunks} notes chunks in ${time}ms. You can now search for them using the "search-notes" tool.`
+        `Indexed ${notes} notes into ${chunks} chunks in ${(time/1000).toFixed(1)}s. You can now search for them using the "search-notes" tool.`
       );
     } else if (name === "search-notes") {
       const { query } = QueryNotesSchema.parse(args);
       const combinedResults = await searchAndCombineResults(notesTable, query);
-      return createTextResponse(JSON.stringify(combinedResults));
+      return createTextResponse(JSON.stringify(combinedResults, null, 2));
     } else {
       throw new Error(`Unknown tool: ${name}`);
     }
@@ -838,166 +950,115 @@ export const searchAndCombineResults = async (
   notesTable: lancedb.Table,
   query: string,
   displayLimit = 5,
-  minCosineSimilarity = 0.05 // Lower threshold for semantic discovery
+  minCosineSimilarity = 0.05
 ) => {
   console.log(`🔍 Semantic search for: "${query}"`);
-  console.log(`📊 Table has ${await notesTable.countRows()} rows`);
+  console.log(`📊 Table has ${await notesTable.countRows()} chunks`);
   
-  const allResults = new Map(); // Use Map to avoid duplicates
+  const noteResults = new Map(); // title -> best result for that note
   
-  // Strategy 1: Exact phrase matching
-  console.log(`\n1️⃣ Exact phrase search...`);
-  const allNotes = await notesTable.search("").limit(20000).toArray();
-  const queryRegex = new RegExp(`\\b${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
-  
-  const exactMatches = allNotes.filter(note => {
-    const titleMatch = queryRegex.test(note.title || '');
-    const contentMatch = queryRegex.test(note.content || '');
-    return titleMatch || contentMatch;
-  });
-  
-  exactMatches.forEach(note => {
-    allResults.set(note.title, {
-      ...note,
-      _relevance_score: 100,
-      _source: 'exact_match'
-    });
-  });
-  
-  console.log(`📋 Exact matches: ${exactMatches.length}`);
-  
-  // Strategy 2: Fuzzy word matching (for partial matches)
-  console.log(`\n2️⃣ Fuzzy word matching...`);
-  const queryWords = query.toLowerCase().split(/\s+/).filter(word => word.length > 2);
-  
-  if (queryWords.length > 0) {
-    const fuzzyMatches = allNotes.filter(note => {
-      const text = `${note.title || ''} ${note.content || ''}`.toLowerCase();
-      return queryWords.some(word => {
-        // Check for partial word matches (e.g., "network" matches "networking")
-        const regex = new RegExp(`\\b\\w*${word}\\w*\\b`, 'gi');
-        return regex.test(text);
-      });
-    });
-    
-    fuzzyMatches.forEach(note => {
-      if (!allResults.has(note.title)) {
-        const text = `${note.title || ''} ${note.content || ''}`.toLowerCase();
-        const matchedWords = queryWords.filter(word => {
-          const regex = new RegExp(`\\b\\w*${word}\\w*\\b`, 'gi');
-          return regex.test(text);
-        });
-        
-        const score = (matchedWords.length / queryWords.length) * 75;
-        allResults.set(note.title, {
-          ...note,
-          _relevance_score: score,
-          _source: 'fuzzy_match'
-        });
-      }
-    });
-    
-    console.log(`📋 Fuzzy matches: ${fuzzyMatches.length}`);
-  }
-  
-  // Strategy 3: FTS search
-  console.log(`\n3️⃣ Full-text search...`);
+  // Strategy 1: Vector search on chunks
+  console.log(`\n1️⃣ Vector semantic search on chunks...`);
   try {
-    const ftsResults = await notesTable.search(query, "fts", "content").limit(20).toArray();
-    
-    ftsResults.forEach(note => {
-      if (!allResults.has(note.title)) {
-        allResults.set(note.title, {
-          ...note,
-          _relevance_score: 65,
-          _source: 'fts'
-        });
-      }
-    });
-    
-    console.log(`📝 FTS results: ${ftsResults.length}`);
-  } catch (error) {
-    console.log(`❌ FTS Error: ${error.message}`);
-  }
-  
-  // Strategy 4: Vector search with adaptive threshold
-  console.log(`\n4️⃣ Vector semantic search...`);
-  try {
-    const vectorResults = await notesTable.search(query, "vector").limit(30).toArray();
+    const vectorResults = await notesTable.search(query, "vector").limit(50).toArray();
     
     if (vectorResults.length > 0) {
-      // Calculate dynamic similarity threshold based on result distribution
-      const similarities = vectorResults.map(note => {
-        const distance = note._distance || 0;
-        return Math.max(0, 1 - (distance * distance / 2));
-      });
+      console.log(`🎯 Found ${vectorResults.length} relevant chunks`);
       
-      // Use median similarity as adaptive threshold, but not below minimum
-      const sortedSimilarities = similarities.sort((a, b) => b - a);
-      const dynamicThreshold = Math.max(
-        minCosineSimilarity,
-        sortedSimilarities[Math.floor(sortedSimilarities.length * 0.7)] || minCosineSimilarity
-      );
-      
-      console.log(`📏 Similarities range: ${similarities[0]?.toFixed(3)} to ${similarities[similarities.length-1]?.toFixed(3)}`);
-      console.log(`🎯 Using dynamic threshold: ${dynamicThreshold.toFixed(3)}`);
-      
-      vectorResults.forEach(note => {
-        const distance = note._distance || 0;
+      vectorResults.forEach(chunk => {
+        const distance = chunk._distance || 0;
         const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
         
-        if (cosineSimilarity > dynamicThreshold) {
-          if (!allResults.has(note.title)) {
-            allResults.set(note.title, {
-              ...note,
-              _relevance_score: cosineSimilarity * 60,
-              _source: 'vector_semantic'
+        if (cosineSimilarity > minCosineSimilarity) {
+          const existing = noteResults.get(chunk.title);
+          
+          if (!existing || cosineSimilarity > existing._relevance_score) {
+            noteResults.set(chunk.title, {
+              title: chunk.title,
+              content: chunk.content,
+              creation_date: chunk.creation_date,
+              modification_date: chunk.modification_date,
+              _relevance_score: cosineSimilarity * 100,
+              _source: 'vector_semantic',
+              _best_chunk_index: chunk.chunk_index,
+              _total_chunks: chunk.total_chunks,
+              _matching_chunk_content: chunk.chunk_content
             });
           }
         }
       });
       
-      console.log(`🎯 Vector semantic results: ${vectorResults.filter(note => {
-        const distance = note._distance || 0;
-        const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
-        return cosineSimilarity > dynamicThreshold;
-      }).length}`);
+      console.log(`📋 Unique notes from vector search: ${noteResults.size}`);
     }
   } catch (error) {
     console.log(`❌ Vector Error: ${error.message}`);
   }
   
-  // Strategy 5: Substring search as fallback
-  console.log(`\n5️⃣ Substring search (fallback)...`);
-  if (allResults.size === 0) {
-    const substringMatches = allNotes.filter(note => {
-      const text = `${note.title || ''} ${note.content || ''}`.toLowerCase();
-      return text.includes(query.toLowerCase());
-    });
+  // Strategy 2: FTS search on chunk content
+  console.log(`\n2️⃣ Full-text search on chunks...`);
+  try {
+    const ftsResults = await notesTable.search(query, "fts", "chunk_content").limit(30).toArray();
     
-    substringMatches.forEach(note => {
-      if (!allResults.has(note.title)) {
-        allResults.set(note.title, {
-          ...note,
-          _relevance_score: 30,
-          _source: 'substring'
+    ftsResults.forEach(chunk => {
+      if (!noteResults.has(chunk.title)) {
+        noteResults.set(chunk.title, {
+          title: chunk.title,
+          content: chunk.content,
+          creation_date: chunk.creation_date,
+          modification_date: chunk.modification_date,
+          _relevance_score: 70,
+          _source: 'fts',
+          _best_chunk_index: chunk.chunk_index,
+          _total_chunks: chunk.total_chunks,
+          _matching_chunk_content: chunk.chunk_content
         });
       }
     });
     
-    console.log(`📋 Substring matches: ${substringMatches.length}`);
+    console.log(`📝 FTS results: ${ftsResults.length} chunks`);
+  } catch (error) {
+    console.log(`❌ FTS Error: ${error.message}`);
   }
   
+  // Strategy 3: Exact phrase matching in chunks
+  console.log(`\n3️⃣ Exact phrase search in chunks...`);
+  const allChunks = await notesTable.search("").limit(20000).toArray();
+  const queryRegex = new RegExp(`\\b${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+  
+  const exactMatches = allChunks.filter(chunk => {
+    const titleMatch = queryRegex.test(chunk.title || '');
+    const contentMatch = queryRegex.test(chunk.chunk_content || '');
+    return titleMatch || contentMatch;
+  });
+  
+  exactMatches.forEach(chunk => {
+    if (!noteResults.has(chunk.title)) {
+      noteResults.set(chunk.title, {
+        title: chunk.title,
+        content: chunk.content,
+        creation_date: chunk.creation_date,
+        modification_date: chunk.modification_date,
+        _relevance_score: 100,
+        _source: 'exact_match',
+        _best_chunk_index: chunk.chunk_index,
+        _total_chunks: chunk.total_chunks,
+        _matching_chunk_content: chunk.chunk_content
+      });
+    }
+  });
+  
+  console.log(`📋 Exact matches: ${exactMatches.length} chunks`);
+  
   // Combine and rank results
-  const combinedResults = Array.from(allResults.values())
+  const combinedResults = Array.from(noteResults.values())
     .sort((a, b) => b._relevance_score - a._relevance_score)
     .slice(0, displayLimit);
   
-  console.log(`\n📊 Final results: ${combinedResults.length} notes (from ${allResults.size} total matches)`);
+  console.log(`\n📊 Final results: ${combinedResults.length} notes (from ${noteResults.size} total matches)`);
   
   if (combinedResults.length > 0) {
     combinedResults.forEach((result, idx) => {
-      console.log(`  ${idx + 1}. "${result.title}" (score: ${result._relevance_score.toFixed(1)}, source: ${result._source})`);
+      console.log(`  ${idx + 1}. "${result.title}" (score: ${result._relevance_score.toFixed(1)}, source: ${result._source}, chunk: ${result._best_chunk_index}/${result._total_chunks})`);
     });
   }
   
@@ -1007,7 +1068,10 @@ export const searchAndCombineResults = async (
     creation_date: result.creation_date,
     modification_date: result.modification_date,
     _relevance_score: result._relevance_score,
-    _source: result._source
+    _source: result._source,
+    _best_chunk_index: result._best_chunk_index,
+    _total_chunks: result._total_chunks,
+    _matching_chunk_preview: result._matching_chunk_content?.substring(0, 200) + (result._matching_chunk_content?.length > 200 ? '...' : '')
   }));
 };
 
