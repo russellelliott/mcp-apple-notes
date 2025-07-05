@@ -47,6 +47,7 @@ export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
       .replace(/\s+/g, ' ') // Normalize whitespace
       .replace(/[^\w\s\-.,!?;:()\[\]{}'"]/g, ' ') // Keep basic punctuation
       .trim()
+      .substring(0, 512); // Limit size
   }
   
   async computeQueryEmbeddings(data: string) {
@@ -700,53 +701,108 @@ const createTextResponse = (text: string) => ({
 
 /**
  * Search for notes by title or content using both vector and FTS search.
- * The results are combined using RRF
+ * The results are combined using RRF with proper similarity filtering
  */
 export const searchAndCombineResults = async (
   notesTable: lancedb.Table,
   query: string,
-  limit = 20
+  displayLimit = 5,
+  minCosineSimilarity = 0.7 // Higher threshold for normalized embeddings
 ) => {
-  const [vectorResults, ftsSearchResults] = await Promise.all([
-    (async () => {
-      const results = await notesTable
-        .search(query, "vector")
-        .limit(limit)
-        .toArray();
-      return results;
-    })(),
-    (async () => {
-      const results = await notesTable
-        .search(query, "fts", "content")
-        .limit(limit)
-        .toArray();
-      return results;
-    })(),
+  console.log(`🔍 Searching for: "${query}"`);
+  console.log(`📊 Table has ${await notesTable.countRows()} rows`);
+  
+  // Search in parallel
+  const [vectorResults, ftsContentResults] = await Promise.all([
+    notesTable.search(query, "vector").toArray(),
+    notesTable.search(query, "fts", "content").toArray(),
   ]);
 
-  const k = 60;
-  const scores = new Map<string, number>();
+  console.log(`🎯 Vector results: ${vectorResults.length}`);
+  console.log(`📝 FTS content results: ${ftsContentResults.length}`);
+  
+  // Log first few vector distances for debugging
+  if (vectorResults.length > 0) {
+    console.log(`📏 Vector distances: ${vectorResults.slice(0, 5).map(r => r._distance?.toFixed(3)).join(', ')}`);
+  }
 
-  const processResults = (results: any[], startRank: number) => {
-    results.forEach((result, idx) => {
-      const key = `${result.title}::${result.content}`;
-      const score = 1 / (k + startRank + idx);
-      scores.set(key, (scores.get(key) || 0) + score);
+  // For normalized embeddings, calculate proper cosine similarity
+  const filteredVectorResults = vectorResults.filter((result, idx) => {
+    const distance = result._distance || 0;
+    // For normalized vectors: cosine_similarity = 1 - (euclidean_distance^2 / 2)
+    const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
+    
+    if (idx < 5) { // Log first 5 for debugging
+      console.log(`Result ${idx}: "${result.title?.substring(0, 40)}" - distance: ${distance.toFixed(3)}, similarity: ${cosineSimilarity.toFixed(3)}`);
+    }
+    
+    return cosineSimilarity >= minCosineSimilarity;
+  });
+
+  console.log(`✅ High-quality vector results: ${filteredVectorResults.length}`);
+
+  // If no high-quality results, gradually lower threshold
+  if (filteredVectorResults.length === 0 && vectorResults.length > 0) {
+    console.log("⚠️ No high-quality matches, trying lower threshold...");
+    const fallbackResults = vectorResults.filter(result => {
+      const distance = result._distance || 0;
+      const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
+      return cosineSimilarity >= 0.5; // Lower threshold
     });
-  };
+    
+    if (fallbackResults.length > 0) {
+      console.log(`📋 Found ${fallbackResults.length} moderate-quality results`);
+      filteredVectorResults.push(...fallbackResults);
+    } else {
+      // Last resort: take top 3 vector results regardless of score
+      console.log("📋 Taking top 3 vector results as last resort");
+      filteredVectorResults.push(...vectorResults.slice(0, 3));
+    }
+  }
 
-  processResults(vectorResults, 0);
-  processResults(ftsSearchResults, 0);
+  // Simple scoring - prioritize vector results heavily since they're semantic
+  const allResults = [
+    ...filteredVectorResults.map((r, idx) => ({ 
+      ...r, 
+      _score: 100 - idx, 
+      _source: 'vector' 
+    })),
+    ...ftsContentResults.map((r, idx) => ({ 
+      ...r, 
+      _score: 50 - idx, 
+      _source: 'fts' 
+    }))
+  ];
 
-  const results = Array.from(scores.entries())
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, limit)
-    .map(([key]) => {
-      const [title, content] = key.split("::");
-      return { title, content };
-    });
+  // Deduplicate using a better key
+  const seen = new Set();
+  const uniqueResults = allResults.filter(result => {
+    const key = result.title || 'untitled';
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return result.title; // Must have title
+  });
 
-  return results;
+  const finalResults = uniqueResults
+    .sort((a, b) => b._score - a._score)
+    .slice(0, displayLimit)
+    .map(result => ({
+      title: result.title,
+      content: result.content?.substring(0, 500) + (result.content?.length > 500 ? '...' : ''), // Truncate for readability
+      creation_date: result.creation_date,
+      modification_date: result.modification_date,
+      _relevance_score: result._score,
+      _source: result._source
+    }));
+
+  console.log(`🎯 Final results: ${finalResults.length}`);
+  
+  // Log final results for debugging
+  finalResults.forEach((result, idx) => {
+    console.log(`Final #${idx + 1}: score=${result._relevance_score}, source=${result._source}, title="${result.title?.substring(0, 50)}"`);
+  });
+  
+  return finalResults;
 };
 
 const CreateNoteSchema = z.object({

@@ -139,3 +139,66 @@ results from that change
 2176.45 seconds ÷ 3600 seconds/hour ≈ 0.60457 hours (~36.27 minutes)
 1000 notes ÷ 2176.45 seconds ≈ 0.4594 notes/second
 ```
+
+results from that change
+
+```bash
+=== Indexing Complete ===
+📊 Stats:
+• Total notes found: 1000
+• Successfully indexed: 1000 notes
+• Failed to process: 0 notes
+• Time taken: 2176.45 seconds
+```
+
+```
+2176.45 seconds ÷ 3600 seconds/hour ≈ 0.60457 hours (~36.27 minutes)
+1000 notes ÷ 2176.45 seconds ≈ 0.4594 notes/second
+```
+
+**Key improvements:**
+- ✅ Upgraded to `Xenova/bge-small-en-v1.5` (better semantic understanding)
+- ✅ Added embedding normalization (`normalize: true`)
+- ✅ Replaced TurndownService with custom HTML-to-plaintext converter
+- ✅ Implemented parallel processing (5 notes at once)
+- ✅ Reduced delays and timeouts
+- ✅ 16.8% faster processing rate
+
+**Next:** Test search quality with new embedding model before scaling to full dataset.
+
+still doesnt work
+
+do 512 char substring for embeddings `.substring(0, 512)`
+```
+=== Indexing Complete ===
+📊 Stats:
+• Total notes found: 100
+• Successfully indexed: 100 notes
+• Failed to process: 0 notes
+• Time taken: 222.96 seconds
+```
+
+still doesnt work
+
+do 512 char substring for embeddings `.substring(0, 512)`
+```
+=== Indexing Complete ===
+📊 Stats:
+• Total notes found: 100
+• Successfully indexed: 100 notes
+• Failed to process: 0 notes
+• Time taken: 222.96 seconds
+```
+
+```
+222.96 seconds ÷ 60 ≈ 3.72 minutes
+100 notes ÷ 222.96 seconds ≈ 0.4487 notes/second
+```
+
+**Latest improvements:**
+- ✅ Added 512-character limit to `cleanText()` function
+- ✅ Should improve embedding quality and consistency
+- ✅ Reduced memory usage during embedding generation
+- ✅ Performance rate consistent at ~0.45 notes/second
+
+**Next:** Test if 512-char limit improved search relevance with simple queries.
