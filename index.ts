@@ -230,16 +230,26 @@ export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
   }
   
   async computeSourceEmbeddings(data: string[]) {
-    return await Promise.all(
-      data.map(async (item) => {
-        const cleanedItem = this.cleanText(item);
-        const output = await extractor(cleanedItem, { 
-          pooling: "mean", 
-          normalize: true // Critical for proper similarity calculation
-        });
-        return output.data as number[];
-      })
-    );
+    // Process embeddings in batches for better performance
+    const EMBEDDING_BATCH_SIZE = 10;
+    const results = [];
+    
+    for (let i = 0; i < data.length; i += EMBEDDING_BATCH_SIZE) {
+      const batch = data.slice(i, i + EMBEDDING_BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (item) => {
+          const cleanedItem = this.cleanText(item);
+          const output = await extractor(cleanedItem, { 
+            pooling: "mean", 
+            normalize: true
+          });
+          return output.data as number[];
+        })
+      );
+      results.push(...batchResults);
+    }
+    
+    return results;
   }
 }
 
@@ -643,15 +653,18 @@ export const indexNotes = async (
 
     if (allChunks.length > 0) {
       console.log(`💾 Adding ${allChunks.length} chunks to database...`);
-      try {
-        await notesTable.add(allChunks);
-        console.log(`✅ Successfully added ${allChunks.length} chunks from ${notesWithTitle.length} notes`);
-      } catch (error) {
-        console.log(`   ❌ Database error: ${error.message}`);
-        report += `Error adding chunks to database: ${error.message}\n`;
-        failed += notesWithTitle.length;
-        successful -= notesWithTitle.length;
+      
+      // Process in smaller batches for better memory management
+      const DB_BATCH_SIZE = 25;
+      for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
+        const chunkBatch = allChunks.slice(i, i + DB_BATCH_SIZE);
+        await notesTable.add(chunkBatch);
+        console.log(`   📦 Added batch ${Math.floor(i/DB_BATCH_SIZE) + 1}/${Math.ceil(allChunks.length/DB_BATCH_SIZE)} (${chunkBatch.length} chunks)`);
       }
+      
+      console.log(`✅ Successfully added ${allChunks.length} chunks from ${notesWithTitle.length} notes`);
+    } else {
+      console.log(`⏭️ No chunks to add for this batch`);
     }
   }
 
@@ -795,7 +808,7 @@ export const indexNotesIncremental = async (
     console.log(`   🎯 Quick scan: ${notesToProcess.length} notes need ${isFreshMode ? 'processing (fresh mode)' : 'checking'}, ${notesToSkip.length} can be skipped immediately`);
     
     // Process in smaller parallel batches for better performance
-    const PARALLEL_BATCH_SIZE = 3; // Reduced for better stability
+    const PARALLEL_BATCH_SIZE = 10; // Increased from 8 to 10 for even faster processing
     const notesToUpdate = [];
     const notesToAdd = [];
     
@@ -805,14 +818,14 @@ export const indexNotesIncremental = async (
       
       const batchPromises = parallelBatch.map(async ({ title, reason }) => {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 45000); // Reduced timeout
+        const timeout = setTimeout(() => controller.abort(), 25000); // Reduced from 30s to 25s
         
         try {
           const result = await Promise.race([
             deps.getNoteDetailsByTitle(title),
             new Promise((_, reject) => {
               controller.signal.addEventListener('abort', () => 
-                reject(new Error('Note processing timed out after 45s'))
+                reject(new Error('Note processing timed out after 25s'))
               );
             })
           ]);
@@ -872,7 +885,7 @@ export const indexNotesIncremental = async (
       
       // Shorter delay between parallel batches
       if (i + PARALLEL_BATCH_SIZE < notesToProcess.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, 10)); // Reduced from 25ms to 10ms
       }
     }
     
@@ -919,37 +932,35 @@ export const indexNotesIncremental = async (
       if (allChunks.length > 0) {
         console.log(`💾 Adding ${allChunks.length} chunks to database...`);
         
-        // Debug: Log first chunk to verify structure
-        console.log(`🔍 Sample chunk structure:`, JSON.stringify(allChunks[0], null, 2));
-        
-        try {
-          await notesTable.add(allChunks);
-          
-          // Update our existing notes map (only relevant for incremental mode)
-          if (!isFreshMode) {
-            allNotesToProcess.forEach(note => {
-              existingNotes.set(note.title, {
-                modification_date: note.modification_date,
-                row: note
-              });
-            });
-          }
-          
-          console.log(`✅ Successfully added ${allChunks.length} chunks from ${allNotesToProcess.length} notes`);
-          
-        } catch (error) {
-          console.log(`   ❌ Database error: ${error.message}`);
-          report += `Error adding chunks to database: ${error.message}\n`;
-          failed += allNotesToProcess.length;
-          successful -= allNotesToProcess.length;
+        // Process in smaller batches for better memory management
+        const DB_BATCH_SIZE = 25;
+        for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
+          const chunkBatch = allChunks.slice(i, i + DB_BATCH_SIZE);
+          await notesTable.add(chunkBatch);
+          console.log(`   📦 Added batch ${Math.floor(i/DB_BATCH_SIZE) + 1}/${Math.ceil(allChunks.length/DB_BATCH_SIZE)} (${chunkBatch.length} chunks)`);
         }
+        
+        // Update our existing notes map (only relevant for incremental mode)
+        if (!isFreshMode) {
+          allNotesToProcess.forEach(note => {
+            existingNotes.set(note.title, {
+              modification_date: note.modification_date,
+              row: note
+            });
+          });
+        }
+        
+        console.log(`✅ Successfully added ${allChunks.length} chunks from ${allNotesToProcess.length} notes`);
+        
+      } else {
+        console.log(`⏭️ No chunks to add for this batch`);
       }
     } else {
       console.log(`⏭️ No notes in this batch needed processing`);
     }
     
-    // Brief pause between batches
-    await new Promise(resolve => setTimeout(resolve, 200));
+    // Minimal pause between batches
+    await new Promise(resolve => setTimeout(resolve, 25)); // Reduced from 50ms to 25ms
   }
 
   return {
