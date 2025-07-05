@@ -413,7 +413,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 const getNotes = async function* (maxNotes?: number) {
   console.log("   Requesting notes list from Apple Notes...");
   try {
-    const BATCH_SIZE = 25;
+    const BATCH_SIZE = 50; // Increased from 25 to 50 for faster note fetching
     let startIndex = 1;
     let hasMore = true;
 
@@ -495,7 +495,7 @@ const getNotes = async function* (maxNotes?: number) {
       startIndex += BATCH_SIZE;
       hasMore = startIndex <= totalCount && titles.length > 0;
 
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000ms to 500ms
     }
 
   } catch (error) {
@@ -560,7 +560,7 @@ export const indexNotes = async (
     console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
     
     // Process notes in parallel batches
-    const PARALLEL_BATCH_SIZE = 5;
+    const PARALLEL_BATCH_SIZE = 12; // Increased from 5 to 12 for much faster processing
     const batchResults = [];
     
     for (let i = 0; i < batch.titles.length; i += PARALLEL_BATCH_SIZE) {
@@ -570,14 +570,14 @@ export const indexNotes = async (
       const parallelResults = await Promise.allSettled(
         parallelBatch.map(async (note) => {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 60000);
+          const timeout = setTimeout(() => controller.abort(), 45000); // Reduced from 60s to 45s
           
           try {
             const result = await Promise.race([
               deps.getNoteDetailsByTitle(note),
               new Promise((_, reject) => {
                 controller.signal.addEventListener('abort', () => 
-                  reject(new Error('Note processing timed out after 60s'))
+                  reject(new Error('Note processing timed out after 45s'))
                 );
               })
             ]);
@@ -608,7 +608,7 @@ export const indexNotes = async (
       }
       
       if (i + PARALLEL_BATCH_SIZE < batch.titles.length) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, 20)); // Reduced from 50ms to 20ms
       }
     }
 
@@ -654,8 +654,8 @@ export const indexNotes = async (
     if (allChunks.length > 0) {
       console.log(`💾 Adding ${allChunks.length} chunks to database...`);
       
-      // Process in smaller batches for better memory management
-      const DB_BATCH_SIZE = 25;
+      // Ultra-fast database insertion with larger batches
+      const DB_BATCH_SIZE = 75; // Increased from 25 to 75 for faster DB writes
       for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
         const chunkBatch = allChunks.slice(i, i + DB_BATCH_SIZE);
         await notesTable.add(chunkBatch);
@@ -807,8 +807,8 @@ export const indexNotesIncremental = async (
     
     console.log(`   🎯 Quick scan: ${notesToProcess.length} notes need ${isFreshMode ? 'processing (fresh mode)' : 'checking'}, ${notesToSkip.length} can be skipped immediately`);
     
-    // Process in smaller parallel batches for better performance
-    const PARALLEL_BATCH_SIZE = 10; // Increased from 8 to 10 for even faster processing
+    // Process in aggressive parallel batches for maximum performance
+    const PARALLEL_BATCH_SIZE = 15; // Increased from 10 to 15 for even faster processing
     const notesToUpdate = [];
     const notesToAdd = [];
     
@@ -818,14 +818,14 @@ export const indexNotesIncremental = async (
       
       const batchPromises = parallelBatch.map(async ({ title, reason }) => {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 25000); // Reduced from 30s to 25s
+        const timeout = setTimeout(() => controller.abort(), 35000); // Increased from 20s to 35s for better reliability
         
         try {
           const result = await Promise.race([
             deps.getNoteDetailsByTitle(title),
             new Promise((_, reject) => {
               controller.signal.addEventListener('abort', () => 
-                reject(new Error('Note processing timed out after 25s'))
+                reject(new Error('Note processing timed out after 35s'))
               );
             })
           ]);
@@ -833,6 +833,32 @@ export const indexNotesIncremental = async (
           return { success: true, data: result, title, reason };
         } catch (error) {
           clearTimeout(timeout);
+          
+          // Add retry logic for timeouts
+          if (error.message.includes('timed out')) {
+            console.log(`     ⏰ "${title}" timed out, retrying with extended timeout...`);
+            try {
+              const retryController = new AbortController();
+              const retryTimeout = setTimeout(() => retryController.abort(), 60000); // 60s retry timeout
+              
+              const retryResult = await Promise.race([
+                deps.getNoteDetailsByTitle(title),
+                new Promise((_, reject) => {
+                  retryController.signal.addEventListener('abort', () => 
+                    reject(new Error('Note processing retry timed out after 60s'))
+                  );
+                })
+              ]);
+              
+              clearTimeout(retryTimeout);
+              console.log(`     ✅ "${title}" succeeded on retry`);
+              return { success: true, data: retryResult, title, reason };
+            } catch (retryError) {
+              console.log(`     ❌ "${title}" failed on retry: ${retryError.message}`);
+              return { success: false, error: retryError, title, reason };
+            }
+          }
+          
           return { success: false, error, title, reason };
         }
       });
@@ -883,9 +909,9 @@ export const indexNotesIncremental = async (
         }
       });
       
-      // Shorter delay between parallel batches
+      // Slightly longer delay between parallel batches for stability
       if (i + PARALLEL_BATCH_SIZE < notesToProcess.length) {
-        await new Promise(resolve => setTimeout(resolve, 10)); // Reduced from 25ms to 10ms
+        await new Promise(resolve => setTimeout(resolve, 15)); // Increased from 5ms to 15ms for better stability
       }
     }
     
@@ -932,8 +958,8 @@ export const indexNotesIncremental = async (
       if (allChunks.length > 0) {
         console.log(`💾 Adding ${allChunks.length} chunks to database...`);
         
-        // Process in smaller batches for better memory management
-        const DB_BATCH_SIZE = 25;
+        // Ultra-fast database insertion with maximum batch size
+        const DB_BATCH_SIZE = 100; // Increased from 25 to 100 for maximum speed
         for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
           const chunkBatch = allChunks.slice(i, i + DB_BATCH_SIZE);
           await notesTable.add(chunkBatch);
@@ -959,8 +985,8 @@ export const indexNotesIncremental = async (
       console.log(`⏭️ No notes in this batch needed processing`);
     }
     
-    // Minimal pause between batches
-    await new Promise(resolve => setTimeout(resolve, 25)); // Reduced from 50ms to 25ms
+    // Balanced pause between batches
+    await new Promise(resolve => setTimeout(resolve, 20)); // Increased from 10ms to 20ms for better stability
   }
 
   return {
