@@ -704,47 +704,67 @@ const createTextResponse = (text: string) => ({
  * The results are combined using RRF with proper similarity filtering
  */
 // Replace your complex searchAndCombineResults with this simple version
+// Replace your searchAndCombineResults function with this:
 export const searchAndCombineResults = async (
   notesTable: lancedb.Table,
   query: string,
   displayLimit = 5,
-  minCosineSimilarity = 0.1 // Very low threshold for debugging
+  minCosineSimilarity = 0.1
 ) => {
   console.log(`🔍 Searching for: "${query}"`);
   console.log(`📊 Table has ${await notesTable.countRows()} rows`);
   
-  // First, let's see if the content exists AT ALL in our database
+  // Get all notes from database
   console.log(`\n🔍 Manually searching through all notes for: "${query}"`);
-  const allNotes = await notesTable.search("").limit(1000).toArray();
+  const allNotes = await notesTable.search("").limit(20000).toArray(); // Increased limit
+  
+  // Create regex for word boundary matching (this is the key fix!)
+  const queryRegex = new RegExp(`\\b${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
   
   const manualMatches = allNotes.filter(note => {
-    const titleMatch = note.title?.toLowerCase().includes(query.toLowerCase());
-    const contentMatch = note.content?.toLowerCase().includes(query.toLowerCase());
+    const titleMatch = queryRegex.test(note.title || '');
+    const contentMatch = queryRegex.test(note.content || '');
     return titleMatch || contentMatch;
   });
   
-  console.log(`📋 Manual search found ${manualMatches.length} notes containing "${query}"`);
+  console.log(`📋 Manual search found ${manualMatches.length} notes containing "${query}" as a whole word`);
   
   if (manualMatches.length > 0) {
     console.log("✅ Content EXISTS in database. Here's what we found:");
-    manualMatches.slice(0, 3).forEach((note, idx) => {
+    manualMatches.slice(0, 5).forEach((note, idx) => {
       console.log(`  ${idx + 1}. "${note.title}"`);
-      const queryIndex = note.content?.toLowerCase().indexOf(query.toLowerCase()) || -1;
-      if (queryIndex >= 0) {
-        const start = Math.max(0, queryIndex - 50);
-        const end = Math.min((note.content?.length || 0), queryIndex + query.length + 50);
-        const snippet = note.content?.substring(start, end) || '';
-        console.log(`     Context: ...${snippet}...`);
+      
+      // Find and show context for the match
+      const content = note.content || '';
+      const match = content.match(queryRegex);
+      if (match) {
+        const matchIndex = content.toLowerCase().indexOf(match[0].toLowerCase());
+        if (matchIndex >= 0) {
+          const start = Math.max(0, matchIndex - 50);
+          const end = Math.min(content.length, matchIndex + match[0].length + 50);
+          const snippet = content.substring(start, end);
+          console.log(`     Context: ...${snippet}...`);
+        }
+      }
+      
+      // Also check title matches
+      if (queryRegex.test(note.title || '')) {
+        console.log(`     Title contains: "${note.title}"`);
       }
     });
-  } else {
-    console.log("❌ Content NOT FOUND in database. This means:");
-    console.log("   - The note wasn't indexed");
-    console.log("   - The content was lost during HTML conversion");
-    console.log("   - The content was truncated by the 512-char limit");
+    
+    // Return the accurate results
+    return manualMatches.slice(0, displayLimit).map(result => ({
+      title: result.title,
+      content: result.content?.substring(0, 300) + (result.content?.length > 300 ? '...' : ''),
+      creation_date: result.creation_date,
+      modification_date: result.modification_date,
+      _relevance_score: 100,
+      _source: 'manual'
+    }));
   }
   
-  // Now test FTS search
+  // FTS and vector search code stays the same...
   console.log(`\n🔍 Testing FTS search for: "${query}"`);
   try {
     const ftsResults = await notesTable.search(query, "fts", "content").limit(10).toArray();
@@ -759,7 +779,6 @@ export const searchAndCombineResults = async (
     console.log(`❌ FTS Error: ${error.message}`);
   }
   
-  // Test vector search with very low threshold
   console.log(`\n🔍 Testing vector search for: "${query}"`);
   try {
     const vectorResults = await notesTable.search(query, "vector").limit(10).toArray();
@@ -776,18 +795,6 @@ export const searchAndCombineResults = async (
     }
   } catch (error) {
     console.log(`❌ Vector Error: ${error.message}`);
-  }
-  
-  // Return manual matches if they exist, otherwise return empty
-  if (manualMatches.length > 0) {
-    return manualMatches.slice(0, displayLimit).map(result => ({
-      title: result.title,
-      content: result.content?.substring(0, 300) + (result.content?.length > 300 ? '...' : ''),
-      creation_date: result.creation_date,
-      modification_date: result.modification_date,
-      _relevance_score: 100,
-      _source: 'manual'
-    }));
   }
   
   return [];
