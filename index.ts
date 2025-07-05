@@ -703,106 +703,94 @@ const createTextResponse = (text: string) => ({
  * Search for notes by title or content using both vector and FTS search.
  * The results are combined using RRF with proper similarity filtering
  */
+// Replace your complex searchAndCombineResults with this simple version
 export const searchAndCombineResults = async (
   notesTable: lancedb.Table,
   query: string,
   displayLimit = 5,
-  minCosineSimilarity = 0.7 // Higher threshold for normalized embeddings
+  minCosineSimilarity = 0.1 // Very low threshold for debugging
 ) => {
   console.log(`🔍 Searching for: "${query}"`);
   console.log(`📊 Table has ${await notesTable.countRows()} rows`);
   
-  // Search in parallel
-  const [vectorResults, ftsContentResults] = await Promise.all([
-    notesTable.search(query, "vector").toArray(),
-    notesTable.search(query, "fts", "content").toArray(),
-  ]);
-
-  console.log(`🎯 Vector results: ${vectorResults.length}`);
-  console.log(`📝 FTS content results: ${ftsContentResults.length}`);
+  // First, let's see if the content exists AT ALL in our database
+  console.log(`\n🔍 Manually searching through all notes for: "${query}"`);
+  const allNotes = await notesTable.search("").limit(1000).toArray();
   
-  // Log first few vector distances for debugging
-  if (vectorResults.length > 0) {
-    console.log(`📏 Vector distances: ${vectorResults.slice(0, 5).map(r => r._distance?.toFixed(3)).join(', ')}`);
-  }
-
-  // For normalized embeddings, calculate proper cosine similarity
-  const filteredVectorResults = vectorResults.filter((result, idx) => {
-    const distance = result._distance || 0;
-    // For normalized vectors: cosine_similarity = 1 - (euclidean_distance^2 / 2)
-    const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
-    
-    if (idx < 5) { // Log first 5 for debugging
-      console.log(`Result ${idx}: "${result.title?.substring(0, 40)}" - distance: ${distance.toFixed(3)}, similarity: ${cosineSimilarity.toFixed(3)}`);
-    }
-    
-    return cosineSimilarity >= minCosineSimilarity;
+  const manualMatches = allNotes.filter(note => {
+    const titleMatch = note.title?.toLowerCase().includes(query.toLowerCase());
+    const contentMatch = note.content?.toLowerCase().includes(query.toLowerCase());
+    return titleMatch || contentMatch;
   });
-
-  console.log(`✅ High-quality vector results: ${filteredVectorResults.length}`);
-
-  // If no high-quality results, gradually lower threshold
-  if (filteredVectorResults.length === 0 && vectorResults.length > 0) {
-    console.log("⚠️ No high-quality matches, trying lower threshold...");
-    const fallbackResults = vectorResults.filter(result => {
-      const distance = result._distance || 0;
-      const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
-      return cosineSimilarity >= 0.5; // Lower threshold
+  
+  console.log(`📋 Manual search found ${manualMatches.length} notes containing "${query}"`);
+  
+  if (manualMatches.length > 0) {
+    console.log("✅ Content EXISTS in database. Here's what we found:");
+    manualMatches.slice(0, 3).forEach((note, idx) => {
+      console.log(`  ${idx + 1}. "${note.title}"`);
+      const queryIndex = note.content?.toLowerCase().indexOf(query.toLowerCase()) || -1;
+      if (queryIndex >= 0) {
+        const start = Math.max(0, queryIndex - 50);
+        const end = Math.min((note.content?.length || 0), queryIndex + query.length + 50);
+        const snippet = note.content?.substring(start, end) || '';
+        console.log(`     Context: ...${snippet}...`);
+      }
     });
-    
-    if (fallbackResults.length > 0) {
-      console.log(`📋 Found ${fallbackResults.length} moderate-quality results`);
-      filteredVectorResults.push(...fallbackResults);
-    } else {
-      // Last resort: take top 3 vector results regardless of score
-      console.log("📋 Taking top 3 vector results as last resort");
-      filteredVectorResults.push(...vectorResults.slice(0, 3));
-    }
+  } else {
+    console.log("❌ Content NOT FOUND in database. This means:");
+    console.log("   - The note wasn't indexed");
+    console.log("   - The content was lost during HTML conversion");
+    console.log("   - The content was truncated by the 512-char limit");
   }
-
-  // Simple scoring - prioritize vector results heavily since they're semantic
-  const allResults = [
-    ...filteredVectorResults.map((r, idx) => ({ 
-      ...r, 
-      _score: 100 - idx, 
-      _source: 'vector' 
-    })),
-    ...ftsContentResults.map((r, idx) => ({ 
-      ...r, 
-      _score: 50 - idx, 
-      _source: 'fts' 
-    }))
-  ];
-
-  // Deduplicate using a better key
-  const seen = new Set();
-  const uniqueResults = allResults.filter(result => {
-    const key = result.title || 'untitled';
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return result.title; // Must have title
-  });
-
-  const finalResults = uniqueResults
-    .sort((a, b) => b._score - a._score)
-    .slice(0, displayLimit)
-    .map(result => ({
+  
+  // Now test FTS search
+  console.log(`\n🔍 Testing FTS search for: "${query}"`);
+  try {
+    const ftsResults = await notesTable.search(query, "fts", "content").limit(10).toArray();
+    console.log(`📝 FTS found ${ftsResults.length} results`);
+    
+    if (ftsResults.length > 0) {
+      ftsResults.slice(0, 3).forEach((result, idx) => {
+        console.log(`  FTS ${idx + 1}. "${result.title}"`);
+      });
+    }
+  } catch (error) {
+    console.log(`❌ FTS Error: ${error.message}`);
+  }
+  
+  // Test vector search with very low threshold
+  console.log(`\n🔍 Testing vector search for: "${query}"`);
+  try {
+    const vectorResults = await notesTable.search(query, "vector").limit(10).toArray();
+    console.log(`🎯 Vector found ${vectorResults.length} results`);
+    
+    if (vectorResults.length > 0) {
+      console.log(`📏 Vector distances: ${vectorResults.slice(0, 5).map(r => r._distance?.toFixed(3)).join(', ')}`);
+      
+      vectorResults.slice(0, 3).forEach((result, idx) => {
+        const distance = result._distance || 0;
+        const cosineSimilarity = Math.max(0, 1 - (distance * distance / 2));
+        console.log(`  Vector ${idx + 1}. "${result.title}" (similarity: ${cosineSimilarity.toFixed(3)})`);
+      });
+    }
+  } catch (error) {
+    console.log(`❌ Vector Error: ${error.message}`);
+  }
+  
+  // Return manual matches if they exist, otherwise return empty
+  if (manualMatches.length > 0) {
+    return manualMatches.slice(0, displayLimit).map(result => ({
       title: result.title,
-      content: result.content?.substring(0, 500) + (result.content?.length > 500 ? '...' : ''), // Truncate for readability
+      content: result.content?.substring(0, 300) + (result.content?.length > 300 ? '...' : ''),
       creation_date: result.creation_date,
       modification_date: result.modification_date,
-      _relevance_score: result._score,
-      _source: result._source
+      _relevance_score: 100,
+      _source: 'manual'
     }));
-
-  console.log(`🎯 Final results: ${finalResults.length}`);
+  }
   
-  // Log final results for debugging
-  finalResults.forEach((result, idx) => {
-    console.log(`Final #${idx + 1}: score=${result._relevance_score}, source=${result._source}, title="${result.title?.substring(0, 50)}"`);
-  });
-  
-  return finalResults;
+  return [];
 };
 
 const CreateNoteSchema = z.object({
