@@ -28,7 +28,8 @@ async function main() {
     
     console.log("\n=== Indexing Complete ===");
     console.log(`📊 Stats:`);
-    console.log(`• Total processed: ${result.chunks} notes`);
+    console.log(`• Notes processed: ${result.notes}`);
+    console.log(`• Chunks created: ${result.chunks}`);
     console.log(`• New notes added: ${result.added}`);
     console.log(`• Notes updated: ${result.updated}`);
     console.log(`• Notes skipped (unchanged): ${result.skipped}`);

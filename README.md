@@ -240,3 +240,25 @@ Detailed Stats: Shows exactly what was added, updated, or skipped
 • Failed: 0 notes
 • Time taken: 213.60 seconds
 ```
+
+
+```
+=== Indexing Complete ===
+📊 Stats:
+• Total processed: 215 notes
+• New notes added: 100
+• Notes updated: 0
+• Notes skipped (unchanged): 0
+• Failed: 0 notes
+• Time taken: 222.36 seconds
+```
+
+=== Indexing Complete ===
+📊 Stats:
+• Notes processed: 100
+• Chunks created: 197
+• New notes added: 100
+• Notes updated: 0
+• Notes skipped (unchanged): 0
+• Failed: 0 notes
+• Time taken: 227.50 seconds

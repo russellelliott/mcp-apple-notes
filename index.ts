@@ -37,79 +37,165 @@ const CHUNK_SIZE = 400; // tokens (留出余量给系统 tokens)
 const CHUNK_OVERLAP = 50; // tokens overlap between chunks
 const MAX_CHUNK_SIZE = 512; // hard limit for safety
 
-// Enhanced chunking function with token awareness
+// Enhanced chunking function with better text preservation
 const createChunks = async (text: string, maxTokens = CHUNK_SIZE, overlap = CHUNK_OVERLAP): Promise<string[]> => {
   if (!text || text.trim().length === 0) {
     return [''];
   }
   
   try {
-    // Tokenize the full text
-    const tokens = await tokenizer(text);
-    const tokenIds = Array.from(tokens.input_ids.data);
+    // First, try to estimate if we need chunking at all
+    const roughTokenCount = text.length / 4; // Rough estimate: ~4 chars per token
     
-    if (tokenIds.length <= maxTokens) {
-      // Text fits in one chunk
-      return [text];
-    }
-    
-    const chunks: string[] = [];
-    let start = 0;
-    
-    while (start < tokenIds.length) {
-      const end = Math.min(start + maxTokens, tokenIds.length);
-      const chunkTokens = tokenIds.slice(start, end);
+    if (roughTokenCount <= maxTokens) {
+      // Text is likely small enough, verify with actual tokenization
+      const tokens = await tokenizer(text);
+      const tokenIds = Array.from(tokens.input_ids.data);
       
-      // Decode tokens back to text
-      const chunkText = tokenizer.decode(chunkTokens, { skip_special_tokens: true });
-      
-      // Clean up the chunk text
-      const cleanedChunk = chunkText.trim();
-      if (cleanedChunk.length > 0) {
-        chunks.push(cleanedChunk);
-      }
-      
-      // Move start position considering overlap
-      start = end - overlap;
-      
-      // Safety check to prevent infinite loop
-      if (start >= tokenIds.length - overlap) {
-        break;
+      if (tokenIds.length <= maxTokens) {
+        return [text]; // Return original text to preserve formatting
       }
     }
     
-    return chunks.length > 0 ? chunks : [text.substring(0, 1000)]; // Fallback
+    // Text needs chunking - use a smarter approach
+    // Split on natural boundaries first (paragraphs, sentences)
+    const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+    
+    if (paragraphs.length === 1) {
+      // Single paragraph, split on sentences
+      const sentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 0);
+      return await createChunksFromSegments(sentences, maxTokens, overlap);
+    } else {
+      // Multiple paragraphs, try to chunk by paragraphs first
+      return await createChunksFromSegments(paragraphs, maxTokens, overlap);
+    }
+    
   } catch (error) {
-    console.log(`⚠️ Tokenization error, falling back to character-based chunking: ${error.message}`);
-    
-    // Fallback to character-based chunking (approximately 4 chars per token)
-    const approxChunkSize = maxTokens * 4;
-    const approxOverlap = overlap * 4;
-    
-    if (text.length <= approxChunkSize) {
-      return [text];
-    }
-    
-    const chunks: string[] = [];
-    let start = 0;
-    
-    while (start < text.length) {
-      const end = Math.min(start + approxChunkSize, text.length);
-      const chunk = text.substring(start, end);
-      
-      if (chunk.trim().length > 0) {
-        chunks.push(chunk.trim());
-      }
-      
-      start = end - approxOverlap;
-      
-      if (start >= text.length - approxOverlap) {
-        break;
-      }
-    }
-    
-    return chunks.length > 0 ? chunks : [text.substring(0, 1000)];
+    console.log(`⚠️ Smart chunking failed, using fallback: ${error.message}`);
+    return createFallbackChunks(text, maxTokens, overlap);
   }
+};
+
+// Helper function to create chunks from text segments (paragraphs or sentences)
+const createChunksFromSegments = async (segments: string[], maxTokens: number, overlap: number): Promise<string[]> => {
+  const chunks: string[] = [];
+  let currentChunk = '';
+  let currentTokens = 0;
+  
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    
+    // Estimate tokens for this segment
+    const segmentTokens = await estimateTokens(segment);
+    
+    // If adding this segment would exceed limit, finalize current chunk
+    if (currentTokens + segmentTokens > maxTokens && currentChunk.length > 0) {
+      chunks.push(currentChunk.trim());
+      
+      // Start new chunk with overlap
+      const overlapText = createOverlapText(currentChunk, overlap);
+      currentChunk = overlapText + (overlapText ? '\n\n' : '') + segment;
+      currentTokens = await estimateTokens(currentChunk);
+    } else {
+      // Add segment to current chunk
+      if (currentChunk.length > 0) {
+        currentChunk += '\n\n' + segment;
+      } else {
+        currentChunk = segment;
+      }
+      currentTokens += segmentTokens;
+    }
+    
+    // If a single segment is too large, split it further
+    if (segmentTokens > maxTokens) {
+      chunks.push(...createFallbackChunks(segment, maxTokens, overlap));
+      currentChunk = '';
+      currentTokens = 0;
+    }
+  }
+  
+  // Add final chunk
+  if (currentChunk.trim().length > 0) {
+    chunks.push(currentChunk.trim());
+  }
+  
+  return chunks.length > 0 ? chunks : [segments.join('\n\n')];
+};
+
+// Helper to estimate token count without full tokenization
+const estimateTokens = async (text: string): Promise<number> => {
+  // For performance, use character-based estimation for most cases
+  const charEstimate = Math.ceil(text.length / 4);
+  
+  // If it's close to the limit, do actual tokenization
+  if (charEstimate > CHUNK_SIZE * 0.8) {
+    try {
+      const tokens = await tokenizer(text);
+      return tokens.input_ids.data.length;
+    } catch {
+      return charEstimate;
+    }
+  }
+  
+  return charEstimate;
+};
+
+// Helper to create overlap text from the end of previous chunk
+const createOverlapText = (chunk: string, overlapTokens: number): string => {
+  if (!chunk || overlapTokens <= 0) return '';
+  
+  // Take approximately the last portion for overlap
+  const overlapChars = overlapTokens * 4; // Rough estimate
+  const words = chunk.split(/\s+/);
+  
+  // Take last few words to approximate overlap
+  const overlapWords = words.slice(-Math.max(1, Math.floor(overlapTokens / 2)));
+  return overlapWords.join(' ');
+};
+
+// Fallback chunking using character-based approach (preserves formatting better)
+const createFallbackChunks = (text: string, maxTokens: number, overlap: number): string[] => {
+  const approxChunkSize = maxTokens * 4; // ~4 chars per token
+  const approxOverlap = overlap * 4;
+  
+  if (text.length <= approxChunkSize) {
+    return [text];
+  }
+  
+  const chunks: string[] = [];
+  let start = 0;
+  
+  while (start < text.length) {
+    const end = Math.min(start + approxChunkSize, text.length);
+    let chunk = text.substring(start, end);
+    
+    // Try to break on word boundaries
+    if (end < text.length) {
+      const lastSpace = chunk.lastIndexOf(' ');
+      const lastNewline = chunk.lastIndexOf('\n');
+      const breakPoint = Math.max(lastSpace, lastNewline);
+      
+      if (breakPoint > start + approxChunkSize * 0.7) {
+        chunk = text.substring(start, start + breakPoint);
+        start = start + breakPoint + 1;
+      } else {
+        start = end;
+      }
+    } else {
+      start = end;
+    }
+    
+    if (chunk.trim().length > 0) {
+      chunks.push(chunk.trim());
+    }
+    
+    // Apply overlap for next chunk
+    if (start < text.length) {
+      start = Math.max(start - approxOverlap, 0);
+    }
+  }
+  
+  return chunks.length > 0 ? chunks : [text.substring(0, approxChunkSize)];
 };
 
 @register("openai")
@@ -571,7 +657,7 @@ export const indexNotes = async (
 
   return {
     chunks: totalChunks,
-    notes: successful,
+    notes: successful, // This is the actual number of notes processed
     failed,
     report,
     allNotes: allNotes.length,
@@ -868,7 +954,7 @@ export const indexNotesIncremental = async (
 
   return {
     chunks: totalChunks,
-    notes: successful,
+    notes: successful, // This is the actual number of notes processed successfully
     failed,
     updated,
     added,
@@ -913,7 +999,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
     } else if (name === "index-notes") {
       const { time, chunks, notes, report, allNotes } = await indexNotes(notesTable);
       return createTextResponse(
-        `Indexed ${notes} notes into ${chunks} chunks in ${(time/1000).toFixed(1)}s. You can now search for them using the "search-notes" tool.`
+        `Successfully indexed ${notes} notes into ${chunks} chunks in ${(time/1000).toFixed(1)}s.\n\n` +
+        `📊 Summary:\n` +
+        `• Notes processed: ${notes}\n` +
+        `• Chunks created: ${chunks}\n` +
+        `• Average chunks per note: ${(chunks/notes).toFixed(1)}\n` +
+        `• Processing time: ${(time/1000).toFixed(1)} seconds\n\n` +
+        `✨ Your notes are now ready for semantic search using the "search-notes" tool!`
       );
     } else if (name === "search-notes") {
       const { query } = QueryNotesSchema.parse(args);
