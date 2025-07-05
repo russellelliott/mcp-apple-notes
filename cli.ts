@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createNotesTable, indexNotes, indexNotesOptimized } from "./index.js";
+import { createNotesTable, indexNotes } from "./index.js";
   
 
 async function main() {
@@ -15,7 +15,7 @@ async function main() {
     console.log(`✅ Database setup complete (${(setupTime / 1000).toFixed(2)}s)\n`);
     
     console.log("📝 Fetching notes from Apple Notes...");
-    const { chunks, time, allNotes, failed, report } = await indexNotesOptimized(notesTable, maxNotes);
+    const { chunks, time, allNotes, failed, report } = await indexNotes(notesTable, maxNotes);
     
     console.log("\n=== Indexing Complete ===");
     console.log(`📊 Stats:`);
