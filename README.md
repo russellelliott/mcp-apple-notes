@@ -381,3 +381,15 @@ bun run index-notes --mode=fresh --max=500
 • Notes skipped (unchanged): 0
 • Failed: 0 notes
 • Time taken: 209.88 seconds
+
+
+
+=== Indexing Complete ===
+📊 Stats:
+• Notes processed: 14054
+• Chunks created: 44394
+• New notes added: 14054
+• Notes updated: 0
+• Notes skipped (unchanged): 0
+• Failed: 29 notes
+• Time taken: 30809.11 seconds
