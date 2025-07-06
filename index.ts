@@ -1149,34 +1149,83 @@ export const searchAndCombineResults = async (
     console.log(`❌ FTS Error: ${error.message}`);
   }
   
-  // Strategy 3: Exact phrase matching in chunks
-  console.log(`\n3️⃣ Exact phrase search in chunks...`);
-  const allChunks = await notesTable.search("").limit(20000).toArray();
-  const queryRegex = new RegExp(`\\b${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
-  
-  const exactMatches = allChunks.filter(chunk => {
-    const titleMatch = queryRegex.test(chunk.title || '');
-    const contentMatch = queryRegex.test(chunk.chunk_content || '');
-    return titleMatch || contentMatch;
-  });
-  
-  exactMatches.forEach(chunk => {
-    if (!noteResults.has(chunk.title)) {
-      noteResults.set(chunk.title, {
-        title: chunk.title,
-        content: chunk.content,
-        creation_date: chunk.creation_date,
-        modification_date: chunk.modification_date,
-        _relevance_score: 100,
-        _source: 'exact_match',
-        _best_chunk_index: chunk.chunk_index,
-        _total_chunks: chunk.total_chunks,
-        _matching_chunk_content: chunk.chunk_content
+  // Strategy 3: Database-level exact phrase matching (much more efficient)
+  console.log(`\n3️⃣ Database-level exact phrase search...`);
+  try {
+    // Use SQL-like filtering instead of loading all chunks
+    const queryWords = query.toLowerCase().split(/\s+/).filter(word => word.length > 2);
+    
+    if (queryWords.length > 0) {
+      // Search for chunks that contain all query words
+      const sqlFilter = `LOWER(chunk_content) LIKE '%${queryWords.join("%' AND LOWER(chunk_content) LIKE '%")}%'`;
+      
+      const exactMatches = await notesTable
+        .search("")
+        .where(sqlFilter)
+        .limit(100)
+        .toArray();
+      
+      console.log(`📋 Database exact matches: ${exactMatches.length} chunks`);
+      
+      exactMatches.forEach(chunk => {
+        if (!noteResults.has(chunk.title)) {
+          // Check if it's a real exact match (for better scoring)
+          const isExactMatch = chunk.chunk_content?.toLowerCase().includes(query.toLowerCase()) ||
+                              chunk.title?.toLowerCase().includes(query.toLowerCase());
+          
+          noteResults.set(chunk.title, {
+            title: chunk.title,
+            content: chunk.content,
+            creation_date: chunk.creation_date,
+            modification_date: chunk.modification_date,
+            _relevance_score: isExactMatch ? 100 : 85,
+            _source: isExactMatch ? 'exact_match' : 'partial_match',
+            _best_chunk_index: chunk.chunk_index,
+            _total_chunks: chunk.total_chunks,
+            _matching_chunk_content: chunk.chunk_content
+          });
+        }
       });
     }
-  });
-  
-  console.log(`📋 Exact matches: ${exactMatches.length} chunks`);
+  } catch (error) {
+    console.log(`❌ Database search error: ${error.message}`);
+    // Fallback: try a simpler approach
+    console.log(`🔄 Trying fallback search...`);
+    try {
+      const fallbackResults = await notesTable
+        .search("")
+        .limit(1000) // Much smaller limit
+        .toArray();
+      
+      const queryRegex = new RegExp(`\\b${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+      
+      const matches = fallbackResults.filter(chunk => {
+        const titleMatch = queryRegex.test(chunk.title || '');
+        const contentMatch = queryRegex.test(chunk.chunk_content || '');
+        return titleMatch || contentMatch;
+      });
+      
+      console.log(`📋 Fallback matches: ${matches.length} chunks`);
+      
+      matches.forEach(chunk => {
+        if (!noteResults.has(chunk.title)) {
+          noteResults.set(chunk.title, {
+            title: chunk.title,
+            content: chunk.content,
+            creation_date: chunk.creation_date,
+            modification_date: chunk.modification_date,
+            _relevance_score: 90,
+            _source: 'fallback_exact',
+            _best_chunk_index: chunk.chunk_index,
+            _total_chunks: chunk.total_chunks,
+            _matching_chunk_content: chunk.chunk_content
+          });
+        }
+      });
+    } catch (fallbackError) {
+      console.log(`❌ Fallback also failed: ${fallbackError.message}`);
+    }
+  }
   
   // Combine and rank results
   const combinedResults = Array.from(noteResults.values())
@@ -1203,10 +1252,3 @@ export const searchAndCombineResults = async (
     _matching_chunk_preview: result._matching_chunk_content?.substring(0, 200) + (result._matching_chunk_content?.length > 200 ? '...' : '')
   }));
 };
-
-const CreateNoteSchema = z.object({
-  title: z.string(),
-  content: z.string(),
-});
-
-export { db };
