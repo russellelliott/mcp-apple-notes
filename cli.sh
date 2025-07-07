@@ -5,4 +5,5 @@
 #bun cli.ts --max=200 --mode=fresh
 
 # Create table from scratch, go over all notes
-bun cli.ts --mode=fresh
+# not from scratch; icremental change
+bun cli.ts
