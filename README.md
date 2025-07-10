@@ -393,3 +393,25 @@ bun run index-notes --mode=fresh --max=500
 • Notes skipped (unchanged): 0
 • Failed: 29 notes
 • Time taken: 30809.11 seconds
+
+
+
+Chat with apple notes
+https://github.com/yashgoenka/chat-apple-notes
+- Limited by OpenAI quotas
+- Does it work with larger apple notes?
+
+might use as reference for how to search
+
+Notes have chunk content as well as the entire content across all the notes
+- could be used to find all the chunks of the notes?
+
+Split notes into categories
+- endpoint to get content of the note
+
+
+Look at that one repo that has used ChatGPT embeddings and such; how does it retrieve relevant data to ask questions on. Use free models for that.
+
+That repo; uses notes://showNote?identifier=id to open specific apple note?
+
+uses OpenAI client; could look into using OpenRouter to use free models?
