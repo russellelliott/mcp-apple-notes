@@ -1089,7 +1089,7 @@ export const searchAndCombineResults = async (
   // Strategy 1: Vector search on chunks
   console.log(`\n1️⃣ Vector semantic search on chunks...`);
   try {
-    const vectorResults = await notesTable.search(query, "vector").limit(50).toArray();
+    const vectorResults = await notesTable.search(query, "vector").toArray();
     
     if (vectorResults.length > 0) {
       console.log(`🎯 Found ${vectorResults.length} relevant chunks`);
@@ -1126,7 +1126,7 @@ export const searchAndCombineResults = async (
   // Strategy 2: FTS search on chunk content
   console.log(`\n2️⃣ Full-text search on chunks...`);
   try {
-    const ftsResults = await notesTable.search(query, "fts", "chunk_content").limit(30).toArray();
+    const ftsResults = await notesTable.search(query, "fts", "chunk_content").toArray();
     
     ftsResults.forEach(chunk => {
       if (!noteResults.has(chunk.title)) {

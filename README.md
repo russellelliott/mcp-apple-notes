@@ -415,3 +415,30 @@ Look at that one repo that has used ChatGPT embeddings and such; how does it ret
 That repo; uses notes://showNote?identifier=id to open specific apple note?
 
 uses OpenAI client; could look into using OpenRouter to use free models?
+
+```python
+EXTRACT_SCRIPT = """
+tell application "Notes"
+   repeat with eachNote in every note
+      set noteId to the id of eachNote
+      set noteTitle to the name of eachNote
+      set noteBody to the body of eachNote
+      set noteCreatedDate to the creation date of eachNote
+      set noteCreated to (noteCreatedDate as «class isot» as string)
+      set noteUpdatedDate to the modification date of eachNote
+      set noteUpdated to (noteUpdatedDate as «class isot» as string)
+      set noteContainer to container of eachNote
+      set noteFolderId to the id of noteContainer
+      log "{split}-id: " & noteId & "\n"
+      log "{split}-created: " & noteCreated & "\n"
+      log "{split}-updated: " & noteUpdated & "\n"
+      log "{split}-folder: " & noteFolderId & "\n"
+      log "{split}-title: " & noteTitle & "\n\n"
+      log noteBody & "\n"
+      log "{split}{split}" & "\n"
+   end repeat
+end tell
+""".strip()
+```
+
+maybe for fetching note data, get the note id?
