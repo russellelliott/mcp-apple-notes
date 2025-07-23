@@ -1127,15 +1127,40 @@ export const searchAndCombineResults = async (
   console.log(`\n2️⃣ Full-text search on chunks...`);
   try {
     const ftsResults = await notesTable.search(query, "fts", "chunk_content").toArray();
-    
+
+    // Compute query embedding once for all FTS results
+    let queryEmbedding: number[] | null = null;
+    try {
+      queryEmbedding = await func.computeQueryEmbeddings(query);
+    } catch (e) {
+      console.log(`⚠️ Could not compute query embedding for FTS scoring: ${e.message}`);
+    }
+
+    // Helper to compute cosine similarity
+    const cosineSimilarity = (a: number[], b: number[]) => {
+      if (!a || !b || a.length !== b.length) return 0;
+      let dot = 0, normA = 0, normB = 0;
+      for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        normA += a[i] * a[i];
+        normB += b[i] * b[i];
+      }
+      if (normA === 0 || normB === 0) return 0;
+      return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    };
+
     ftsResults.forEach(chunk => {
       if (!noteResults.has(chunk.title)) {
+        let score = 70; // fallback
+        if (queryEmbedding && Array.isArray(chunk.vector) && chunk.vector.length === queryEmbedding.length) {
+          score = Math.max(0, cosineSimilarity(queryEmbedding, chunk.vector)) * 100;
+        }
         noteResults.set(chunk.title, {
           title: chunk.title,
           content: chunk.content,
           creation_date: chunk.creation_date,
           modification_date: chunk.modification_date,
-          _relevance_score: 70,
+          _relevance_score: score,
           _source: 'fts',
           _best_chunk_index: chunk.chunk_index,
           _total_chunks: chunk.total_chunks,
@@ -1143,7 +1168,7 @@ export const searchAndCombineResults = async (
         });
       }
     });
-    
+
     console.log(`📝 FTS results: ${ftsResults.length} chunks`);
   } catch (error) {
     console.log(`❌ FTS Error: ${error.message}`);
@@ -1229,26 +1254,24 @@ export const searchAndCombineResults = async (
   
   // Combine and rank results
   const combinedResults = Array.from(noteResults.values())
-    .sort((a, b) => b._relevance_score - a._relevance_score)
-    .slice(0, displayLimit);
-  
+    .sort((a, b) => b._relevance_score - a._relevance_score);
+
   console.log(`\n📊 Final results: ${combinedResults.length} notes (from ${noteResults.size} total matches)`);
-  
+
   if (combinedResults.length > 0) {
     combinedResults.forEach((result, idx) => {
       console.log(`  ${idx + 1}. "${result.title}" (score: ${result._relevance_score.toFixed(1)}, source: ${result._source}, chunk: ${result._best_chunk_index}/${result._total_chunks})`);
     });
   }
-  
+
   return combinedResults.map(result => ({
     title: result.title,
-    content: result.content?.substring(0, 300) + (result.content?.length > 300 ? '...' : ''),
     creation_date: result.creation_date,
     modification_date: result.modification_date,
     _relevance_score: result._relevance_score,
     _source: result._source,
     _best_chunk_index: result._best_chunk_index,
     _total_chunks: result._total_chunks,
-    _matching_chunk_preview: result._matching_chunk_content?.substring(0, 200) + (result._matching_chunk_content?.length > 200 ? '...' : '')
+    _matching_chunk_preview: result._matching_chunk_content
   }));
 };

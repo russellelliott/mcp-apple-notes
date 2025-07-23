@@ -42,7 +42,7 @@ async function main() {
       results.forEach((result, idx) => {
         console.log(`\n#${idx + 1}`);
         console.log(`Title: ${result.title}`);
-        console.log(`Content: ${result.content}`);
+        console.log(`Relevant Chunk: ${result._matching_chunk_preview}`);
       });
     }
     process.exit(0);
@@ -53,51 +53,3 @@ async function main() {
 }
 
 main();
-
-/*
-async function checkNoteCoverage() {
-  const db = await lancedb.connect(`${process.env.HOME}/.mcp-apple-notes/data`);
-  const notesTable = await db.openTable("notes");
-
-  console.log("🔍 Checking note coverage...\n");
-  
-  // Get all notes from database
-  const allNotes = await notesTable.search("").limit(20000).toArray();
-  console.log(`📊 Total notes in database: ${allNotes.length}`);
-  
-  // Search for Ava with word boundaries
-  const avaRegex = /\bAva\b/gi;
-  const avaMatches = allNotes.filter(note => {
-    const titleMatch = avaRegex.test(note.title || '');
-    const contentMatch = avaRegex.test(note.content || '');
-    return titleMatch || contentMatch;
-  });
-  
-  console.log(`📋 Found ${avaMatches.length} notes containing "Ava" as a whole word:`);
-  
-  avaMatches.slice(0, 10).forEach((note, idx) => {
-    console.log(`${idx + 1}. "${note.title}"`);
-  });
-  
-  // Check for partial matches (like "available")
-  const partialMatches = allNotes.filter(note => {
-    const titleMatch = note.title?.toLowerCase().includes('ava');
-    const contentMatch = note.content?.toLowerCase().includes('ava');
-    return titleMatch || contentMatch;
-  });
-  
-  console.log(`\n📋 Found ${partialMatches.length} notes containing "ava" substring:`);
-  
-  // Show the difference
-  const falsePositives = partialMatches.filter(note => !avaMatches.includes(note));
-  console.log(`❌ False positives (contains "ava" but not "Ava"): ${falsePositives.length}`);
-  
-  falsePositives.slice(0, 5).forEach((note, idx) => {
-    console.log(`${idx + 1}. "${note.title}" (likely contains "available", "avatar", etc.)`);
-  });
-  
-  process.exit(0);
-}
-
-checkNoteCoverage();
-*/
