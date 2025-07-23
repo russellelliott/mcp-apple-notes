@@ -442,3 +442,23 @@ end tell
 ```
 
 maybe for fetching note data, get the note id?
+
+LMStudio; run LLMs locally on your machine
+https://lmstudio.ai/
+
+https://lmstudio.ai/blog/lmstudio-v0.3.17
+
+https://github.com/RafalWilinski/mcp-apple-notes
+Open the claude_desktop_config.json and add the following entry:
+```json
+{
+  "mcpServers": {
+    "local-machine": {
+      "command": "/Users/<YOUR_USER_NAME>/.bun/bin/bun",
+      "args": ["/Users/<YOUR_USER_NAME>/apple-notes-mcp/index.ts"]
+    }
+  }
+}
+```
+advantage of LMStudio is that it's free to integrate MCP servers, while Claude requires paid subscription for that, which is something the repos failed to mention.
+https://www.anthropic.com/pricing
