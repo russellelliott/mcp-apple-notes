@@ -6,4 +6,7 @@
 
 # Create table from scratch, go over all notes
 # not from scratch; icremental change
-bun cli.ts
+# bun cli.ts
+
+# start with small amount of notes to make sure it works; start from scratch
+bun cli.ts --max=10 --mode=fresh

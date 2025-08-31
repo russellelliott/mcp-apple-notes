@@ -462,3 +462,18 @@ Open the claude_desktop_config.json and add the following entry:
 ```
 advantage of LMStudio is that it's free to integrate MCP servers, while Claude requires paid subscription for that, which is something the repos failed to mention.
 https://www.anthropic.com/pricing
+
+you may notice that some notes timeout sometimes and retry with extended timeout. this is typical and works out in the end.
+
+
+Get url of apple notes
+https://discourse.hookproductivity.com/t/using-the-built-in-notes-url-scheme/6071
+- It needs full disk access
+- Chat with apple notes
+- https://github.com/yashgoenka/chat-apple-notes
+
+`test-note-id.ts` shows how to get the ID of a given note.
+
+it might be something to look into? would need full disk access. the method with just doing it by title works without full disk access.
+- honestly seems like alot of effort. the solution i have right now is sufficient
+- if i really wanted to, i could somehow track the number of notes with a given title, then add those one by one?
