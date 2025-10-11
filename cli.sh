@@ -8,5 +8,5 @@
 # not from scratch; icremental change
 # bun cli.ts
 
-# start with small amount of notes to make sure it works; start from scratch
-bun cli.ts --max=10 --mode=fresh
+# start with small amount of notes to make sure it works; start from scratch using enhanced method
+bun cli.ts --max=10 --mode=fresh --method=enhanced

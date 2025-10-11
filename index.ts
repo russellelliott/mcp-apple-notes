@@ -232,7 +232,7 @@ export class OnDeviceEmbeddingFunction extends EmbeddingFunction<string> {
   async computeSourceEmbeddings(data: string[]) {
     // Process embeddings in batches for better performance
     const EMBEDDING_BATCH_SIZE = 10;
-    const results: number[][] = [];
+    const results = [];
     
     for (let i = 0; i < data.length; i += EMBEDDING_BATCH_SIZE) {
       const batch = data.slice(i, i + EMBEDDING_BATCH_SIZE);
@@ -335,6 +335,7 @@ const QueryNotesSchema = z.object({
 
 const GetNoteSchema = z.object({
   title: z.string(),
+  creation_date: z.string().optional(),
 });
 
 export const server = new Server(
@@ -384,12 +385,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "index-notes-enhanced",
+        description:
+          "Enhanced indexing that handles duplicate note titles better by fetching notes with title and creation date. Use this if regular indexing has timeout issues.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      },
+      {
+        name: "index-notes-enhanced",
+        description:
+          "Enhanced indexing that fetches notes by title AND creation date to handle duplicate titles better. Use this for more reliable indexing when you have notes with duplicate titles.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      },
+      {
         name: "get-note",
-        description: "Get a note full content and details by title",
+        description: "Get a note full content and details by title. If multiple notes have the same title, you can specify creation_date to get a specific one.",
         inputSchema: {
           type: "object",
           properties: {
             title: z.string(),
+            creation_date: z.string().optional(),
           },
           required: ["title"],
         },
@@ -405,73 +427,488 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["query"],
         },
       },
-      {
-        name: "create-note",
-        description:
-          "Create a new Apple Note with specified title and content. Must be in HTML format WITHOUT newlines",
-        inputSchema: {
-          type: "object",
-          properties: {
-            title: { type: "string" },
-            content: { type: "string" },
-          },
-          required: ["title", "content"],
-        },
-      },
+      // Remove create-note tool since it's not needed
     ],
   };
 });
 
-const fetchAndIndexAllNotes = async (notesTable) => {
-  const start = performance.now();
+const getNotes = async function* (maxNotes?: number) {
+  console.log("   Requesting notes list from Apple Notes...");
+  try {
+    const BATCH_SIZE = 50; // Increased from 25 to 50 for faster note fetching
+    let startIndex = 1;
+    let hasMore = true;
+
+    // Get total count or use the limit
+    let totalCount: number;
+    
+    if (maxNotes) {
+      totalCount = maxNotes;
+      console.log(`   🎯 Using subset limit: ${totalCount} notes`);
+    } else {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120000);
+
+      totalCount = await Promise.race([
+        runJxa(`
+          const app = Application('Notes');
+          app.includeStandardAdditions = true;
+          return app.notes().length;
+        `),
+        new Promise((_, reject) => {
+          controller.signal.addEventListener('abort', () => 
+            reject(new Error('Getting notes count timed out after 120s'))
+          );
+        })
+      ]) as number;
+
+      clearTimeout(timeout);
+      console.log(`   📊 Total notes found: ${totalCount}`);
+    }
+
+    while (hasMore) {
+      console.log(`   Fetching batch of notes (${startIndex} to ${startIndex + BATCH_SIZE - 1})...`);
+      
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120000);
+
+      const batchResult = await Promise.race([
+        runJxa(`
+          const app = Application('Notes');
+          app.includeStandardAdditions = true;
+          
+          const titles = [];
+          for (let i = ${startIndex}; i < ${startIndex + BATCH_SIZE}; i++) {
+            try {
+              const note = app.notes[i - 1];
+              if (note) {
+                titles.push(note.name());
+              }
+            } catch (error) {
+              continue;
+            }
+          }
+          return titles;
+        `),
+        new Promise((_, reject) => {
+          controller.signal.addEventListener('abort', () => 
+            reject(new Error('Getting notes batch timed out after 120s'))
+          );
+        })
+      ]);
+
+      clearTimeout(timeout);
+      
+      const titles = batchResult as string[];
+      
+      // Yield the batch along with progress info
+      yield {
+        titles,
+        progress: {
+          current: startIndex + titles.length - 1,
+          total: totalCount,
+          batch: {
+            start: startIndex,
+            end: startIndex + BATCH_SIZE - 1
+          }
+        }
+      };
+      
+      startIndex += BATCH_SIZE;
+      hasMore = startIndex <= totalCount && titles.length > 0;
+
+      await new Promise(resolve => setTimeout(resolve, 500)); // Reduced from 1000ms to 500ms
+    }
+
+  } catch (error) {
+    console.error("   ❌ Error getting notes list:", error.message);
+    throw new Error(`Failed to get notes list: ${error.message}`);
+  }
+};
+
+// Update the existing getNoteDetailsByTitle to use the new function
+const getNoteDetailsByTitle = async (title: string, creationDate?: string) => {
+  // If creation date is provided, fetch that specific note
+  if (creationDate) {
+    const note = await getNoteByTitleAndDate(title, creationDate);
+    if (!note) {
+      throw new Error(`Note "${title}" with creation date "${creationDate}" not found`);
+    }
+    return note;
+  }
   
-  console.log('Starting full notes fetch and indexing...');
-  
-  // Step 1: Single JXA call to get all notes
-  console.log('\nStep 1: Fetching all notes from Apple Notes...');
-  
-  const allNotesData = await runJxa(`
+  // Otherwise, find all notes with this title
+  const notesWithTitle = await runJxa(`
     const app = Application('Notes');
-    app.includeStandardAdditions = true;
+    const targetTitle = "${title.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}";
     
-    const notes = app.notes();
-    const totalCount = notes.length;
+    try {
+      const matchingNotes = app.notes.whose({name: targetTitle});
+      const results = [];
+      
+      for (let i = 0; i < matchingNotes.length; i++) {
+        const note = matchingNotes[i];
+        results.push({
+          title: note.name(),
+          creation_date: note.creationDate().toLocaleString()
+        });
+      }
+      
+      return JSON.stringify(results);
+    } catch (error) {
+      return "[]";
+    }
+  `);
+  
+  const matches = JSON.parse(notesWithTitle as string) as Array<{
+    title: string;
+    creation_date: string;
+  }>;
+  
+  if (matches.length === 0) {
+    throw new Error(`Note "${title}" not found`);
+  }
+  
+  if (matches.length === 1) {
+    // Single note, fetch it
+    return await getNoteByTitleAndDate(matches[0].title, matches[0].creation_date);
+  }
+  
+  // Multiple notes with same title - return info about all of them
+  throw new Error(
+    `Multiple notes found with title "${title}".\n` +
+    `Found ${matches.length} notes with creation dates:\n` +
+    matches.map((m, i) => `  ${i + 1}. Created: ${m.creation_date}`).join('\n') +
+    `\n\nPlease specify the creation_date parameter to get a specific note.`
+  );
+};
+
+// New helper function to get note by title AND creation date
+const getNoteByTitleAndDate = async (title: string, creationDate: string) => {
+  // Escape special characters in title and date
+  const escapedTitle = title.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escapedDate = creationDate.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  
+  const note = await runJxa(`
+    const app = Application('Notes');
+    const targetTitle = "${escapedTitle}";
+    const targetDate = "${escapedDate}";
     
-    console.log("Found " + totalCount + " notes");
-    
-    const allNotes = [];
-    
-    for (let i = 0; i < totalCount; i++) {
-      try {
-        const note = notes[i];
-        allNotes.push({
+    try {
+      // Get all notes with matching title
+      const matchingNotes = app.notes.whose({name: targetTitle});
+      
+      if (matchingNotes.length === 0) {
+        return "{}";
+      }
+      
+      // If only one note with this title, return it
+      if (matchingNotes.length === 1) {
+        const note = matchingNotes[0];
+        return JSON.stringify({
           title: note.name(),
           content: note.body(),
           creation_date: note.creationDate().toLocaleString(),
           modification_date: note.modificationDate().toLocaleString()
         });
+      }
+      
+      // Multiple notes with same title - find by creation date
+      for (let i = 0; i < matchingNotes.length; i++) {
+        const note = matchingNotes[i];
+        const noteDate = note.creationDate().toLocaleString();
+        
+        if (noteDate === targetDate) {
+          return JSON.stringify({
+            title: note.name(),
+            content: note.body(),
+            creation_date: noteDate,
+            modification_date: note.modificationDate().toLocaleString()
+          });
+        }
+      }
+      
+      // Fallback: return first match if date doesn't match exactly
+      // (date formatting might differ slightly)
+      const note = matchingNotes[0];
+      return JSON.stringify({
+        title: note.name(),
+        content: note.body(),
+        creation_date: note.creationDate().toLocaleString(),
+        modification_date: note.modificationDate().toLocaleString()
+      });
+      
+    } catch (error) {
+      console.log("Error fetching note: " + error.toString());
+      return "{}";
+    }
+  `);
+
+  const parsed = JSON.parse(note as string);
+  
+  // Return null if empty object (note not found)
+  if (Object.keys(parsed).length === 0) {
+    return null;
+  }
+  
+  return parsed as {
+    title: string;
+    content: string;
+    creation_date: string;
+    modification_date: string;
+  };
+};
+
+// Update the indexNotes function to use the new converter
+// Update indexNotes to accept a limit parameter
+
+// Optimized version of indexNotes for faster processing
+export const indexNotes = async (
+  notesTable: any,
+  maxNotes?: number,
+  deps = {
+    getNotes,
+    getNoteDetailsByTitle
+  }
+) => {
+  const start = performance.now();
+  let report = "";
+  let processed = 0;
+  let successful = 0;
+  let failed = 0;
+  let totalChunks = 0;
+  let allNotes: string[] = [];
+  
+  console.log(`📚 Getting and processing notes with chunking${maxNotes ? ` (max: ${maxNotes})` : ''}...`);
+  
+  for await (const batch of deps.getNotes(maxNotes)) {
+    allNotes = [...allNotes, ...batch.titles];
+    console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
+    
+    // Process notes in parallel batches
+    const PARALLEL_BATCH_SIZE = 12; // Increased from 5 to 12 for much faster processing
+    const batchResults = [];
+    
+    for (let i = 0; i < batch.titles.length; i += PARALLEL_BATCH_SIZE) {
+      const parallelBatch = batch.titles.slice(i, i + PARALLEL_BATCH_SIZE);
+      console.log(`   🔍 Processing ${parallelBatch.length} notes in parallel...`);
+      
+      const parallelResults = await Promise.allSettled(
+        parallelBatch.map(async (note) => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 90000); // Increased from 45s to 90s for better reliability
+          
+          try {
+            const result = await Promise.race([
+              deps.getNoteDetailsByTitle(note),
+              new Promise((_, reject) => {
+                controller.signal.addEventListener('abort', () => 
+                  reject(new Error('Note processing timed out after 90s'))
+                );
+              })
+            ]);
+            clearTimeout(timeout);
+            return result;
+          } catch (error) {
+            clearTimeout(timeout);
+            throw error;
+          }
+        })
+      );
+      
+      // Process results and create chunks
+      for (let idx = 0; idx < parallelResults.length; idx++) {
+        const result = parallelResults[idx];
+        const note = parallelBatch[idx];
+        
+        if (result.status === 'fulfilled') {
+          processed++;
+          successful++;
+          batchResults.push(result.value);
+          console.log(`   ✅ Note "${note}" processed successfully`);
+        } else {
+          failed++;
+          console.log(`   ❌ Failed to process note "${note}": ${result.reason?.message}`);
+          report += `Error processing note "${note}": ${result.reason?.message}\n`;
+        }
+      }
+      
+      if (i + PARALLEL_BATCH_SIZE < batch.titles.length) {
+        await new Promise(resolve => setTimeout(resolve, 20)); // Reduced from 50ms to 20ms
+      }
+    }
+
+    console.log("📥 Converting batch to plain text and creating chunks...");
+    
+    const notesWithTitle = batchResults.filter((n) => n.title);
+    console.log(`   🔍 After title filter: ${batchResults.length} -> ${notesWithTitle.length} notes`);
+    
+    const allChunks = [];
+    
+    for (const note of notesWithTitle) {
+      try {
+        const plainTextContent = htmlToPlainText(note.content || "");
+        const fullText = `${note.title}\n\n${plainTextContent}`;
+        
+        // Create chunks from the full text
+        const chunks = await createChunks(fullText);
+        console.log(`   📄 "${note.title}": ${chunks.length} chunks created`);
+        
+        // Create chunk records
+        chunks.forEach((chunkContent, index) => {
+          allChunks.push({
+            title: note.title,
+            content: plainTextContent, // Keep full content for reference
+            creation_date: note.creation_date,
+            modification_date: note.modification_date,
+            chunk_index: index.toString(),
+            total_chunks: chunks.length.toString(),
+            chunk_content: chunkContent, // This is what gets embedded
+          });
+        });
+        
+        totalChunks += chunks.length;
+        
+      } catch (error) {
+        console.log(`   ❌ Error processing note "${note.title}": ${error.message}`);
+        report += `Error processing note "${note.title}": ${error.message}\n`;
+        failed++;
+        successful--;
+      }
+    }
+
+    if (allChunks.length > 0) {
+      console.log(`💾 Adding ${allChunks.length} chunks to database...`);
+      
+      // Ultra-fast database insertion with larger batches
+      const DB_BATCH_SIZE = 75; // Increased from 25 to 75 for faster DB writes
+      for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
+        const chunkBatch = allChunks.slice(i, i + DB_BATCH_SIZE);
+        await notesTable.add(chunkBatch);
+        console.log(`   📦 Added batch ${Math.floor(i/DB_BATCH_SIZE) + 1}/${Math.ceil(allChunks.length/DB_BATCH_SIZE)} (${chunkBatch.length} chunks)`);
+      }
+      
+      console.log(`✅ Successfully added ${allChunks.length} chunks from ${notesWithTitle.length} notes`);
+    } else {
+      console.log(`⏭️ No chunks to add for this batch`);
+    }
+  }
+
+  return {
+    chunks: totalChunks,
+    notes: successful, // This is the actual number of notes processed
+    failed,
+    report,
+    allNotes: allNotes.length,
+    time: performance.now() - start,
+  };
+};
+
+// Enhanced fetchAndIndexAllNotes function that fetches by title and creation date
+export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) => {
+  const start = performance.now();
+  
+  console.log(`Starting full notes fetch and indexing${maxNotes ? ` (max: ${maxNotes} notes)` : ''}...`);
+  
+  // Step 1: First fetch all titles and creation dates
+  console.log('\nStep 1: Fetching note titles and creation dates...');
+  
+  const noteTitlesData = await runJxa(`
+    const app = Application('Notes');
+    app.includeStandardAdditions = true;
+    
+    const notes = app.notes();
+    const totalCount = notes.length;
+    const maxNotes = ${maxNotes || 'null'};
+    const limitCount = maxNotes ? Math.min(totalCount, maxNotes) : totalCount;
+    
+    console.log("Found " + totalCount + " notes" + (maxNotes ? ", limiting to " + limitCount : ""));
+    
+    const noteTitles = [];
+    
+    for (let i = 0; i < limitCount; i++) {
+      try {
+        const note = notes[i];
+        noteTitles.push({
+          title: note.name(),
+          creation_date: note.creationDate().toLocaleString()
+        });
         
         if ((i + 1) % 100 === 0) {
-          console.log("Fetched: " + (i + 1) + "/" + totalCount);
+          console.log("Fetched titles: " + (i + 1) + "/" + limitCount);
         }
       } catch (error) {
         console.log("Error at index " + i + ": " + error.toString());
       }
     }
     
-    return JSON.stringify(allNotes);
+    return JSON.stringify(noteTitles);
   `);
   
-  const allNotes = JSON.parse(allNotesData as string) as Array<{
+  const noteTitles = JSON.parse(noteTitlesData as string) as Array<{
+    title: string;
+    creation_date: string;
+  }>;
+  console.log(`Fetched ${noteTitles.length} note titles in ${((performance.now() - start)/1000).toFixed(1)}s`);
+  
+  // Step 2: Fetch each note by title AND creation date
+  console.log('\nStep 2: Fetching full note content by title and creation date...');
+  
+  const allNotes: Array<{
     title: string;
     content: string;
     creation_date: string;
     modification_date: string;
-  }>;
-  console.log(`Fetched ${allNotes.length} notes in ${((performance.now() - start)/1000).toFixed(1)}s`);
+  }> = [];
   
-  // Step 2: Process into chunks and add to database
-  console.log('\nStep 2: Processing notes into chunks...');
+  let fetchProgress = 0;
+  const batchSize = 50; // Process in batches for better performance
+  
+  for (let i = 0; i < noteTitles.length; i += batchSize) {
+    const batch = noteTitles.slice(i, i + batchSize);
+    const batchNum = Math.floor(i / batchSize) + 1;
+    const totalBatches = Math.ceil(noteTitles.length / batchSize);
+    
+    console.log(`\n📦 Processing batch ${batchNum}/${totalBatches} (${batch.length} notes):`);
+    
+    // Fetch batch in parallel
+    const batchResults = await Promise.all(
+      batch.map(async ({ title, creation_date }, index) => {
+        try {
+          console.log(`   📄 [${batchNum}.${index + 1}] Fetching: "${title}" (${creation_date})`);
+          const result = await getNoteByTitleAndDate(title, creation_date);
+          if (result) {
+            console.log(`   ✅ [${batchNum}.${index + 1}] Success: "${title}"`);
+          } else {
+            console.log(`   ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}"`);
+          }
+          return result;
+        } catch (error) {
+          console.log(`   ❌ [${batchNum}.${index + 1}] Failed: "${title}" - ${(error as Error).message}`);
+          return null;
+        }
+      })
+    );
+    
+    // Add successful fetches to allNotes
+    batchResults.forEach(note => {
+      if (note) {
+        allNotes.push(note);
+      }
+    });
+    
+    fetchProgress += batch.length;
+    console.log(`📊 Batch ${batchNum} complete: ${batchResults.filter(r => r !== null).length}/${batch.length} successful`);
+    
+    if (fetchProgress % 100 === 0 || fetchProgress === noteTitles.length) {
+      console.log(`🎯 Overall progress: ${fetchProgress}/${noteTitles.length} notes processed`);
+    }
+  }
+  
+  console.log(`Fetched ${allNotes.length} complete notes in ${((performance.now() - start)/1000).toFixed(1)}s`);
+  
+  // Step 3: Process into chunks and add to database
+  console.log('\nStep 3: Processing notes into chunks...');
   
   let totalChunks = 0;
   let processed = 0;
@@ -488,9 +925,13 @@ const fetchAndIndexAllNotes = async (notesTable) => {
   
   for (const note of allNotes) {
     try {
+      console.log(`📝 [${processed + 1}/${allNotes.length}] Chunking: "${note.title}"`);
+      
       const plainText = htmlToPlainText(note.content || "");
       const fullText = `${note.title}\n\n${plainText}`;
       const chunks = await createChunks(fullText);
+      
+      console.log(`   ✂️ Created ${chunks.length} chunk${chunks.length === 1 ? '' : 's'} for "${note.title}"`);
       
       chunks.forEach((chunkContent, index) => {
         allChunks.push({
@@ -507,25 +948,36 @@ const fetchAndIndexAllNotes = async (notesTable) => {
       totalChunks += chunks.length;
       processed++;
       
-      if (processed % 100 === 0) {
-        console.log(`Processed: ${processed}/${allNotes.length} notes (${totalChunks} chunks)`);
+      if (processed % 5 === 0 || processed === allNotes.length) {
+        console.log(`📊 Chunking progress: ${processed}/${allNotes.length} notes → ${totalChunks} total chunks`);
       }
     } catch (error) {
       failed++;
-      console.log(`Failed to process "${note.title}": ${error.message}`);
+      console.log(`❌ [${processed + 1}/${allNotes.length}] Failed to chunk "${note.title}": ${(error as Error).message}`);
     }
   }
   
-  // Step 3: Add to database in batches
-  console.log(`\nStep 3: Adding ${allChunks.length} chunks to database...`);
-  
+  // Step 4: Add to database in batches
   const DB_BATCH_SIZE = 100;
+  
+  console.log(`\nStep 4: Adding ${allChunks.length} chunks to database...`);
+  console.log(`💡 Using batch size of ${DB_BATCH_SIZE} chunks per database write for optimal performance.`);
+  
+  const totalBatches = Math.ceil(allChunks.length / DB_BATCH_SIZE);
+  
   for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
     const batch = allChunks.slice(i, i + DB_BATCH_SIZE);
+    const batchNum = Math.floor(i / DB_BATCH_SIZE) + 1;
+    
+    console.log(`💾 [${batchNum}/${totalBatches}] Writing batch of ${batch.length} chunks to database...`);
+    
     await notesTable.add(batch);
     
+    const progress = Math.min(i + DB_BATCH_SIZE, allChunks.length);
+    console.log(`✅ [${batchNum}/${totalBatches}] Written ${progress}/${allChunks.length} chunks`);
+    
     if ((i + DB_BATCH_SIZE) % 1000 === 0) {
-      console.log(`Added: ${i + DB_BATCH_SIZE}/${allChunks.length} chunks`);
+      console.log(`🎯 Major checkpoint: ${i + DB_BATCH_SIZE}/${allChunks.length} chunks written to database`);
     }
   }
   
@@ -534,49 +986,6 @@ const fetchAndIndexAllNotes = async (notesTable) => {
   console.log(`\nComplete! ${processed} notes → ${totalChunks} chunks in ${totalTime.toFixed(1)}s`);
   
   return { processed, totalChunks, failed, timeSeconds: totalTime };
-};
-
-const getNoteDetailsByTitle = async (title: string) => {
-  const note = await runJxa(
-    `const app = Application('Notes');
-    const title = "${title}"
-    
-    try {
-        const note = app.notes.whose({name: title})[0];
-        
-        const noteInfo = {
-            title: note.name(),
-            content: note.body(),
-            creation_date: note.creationDate().toLocaleString(),
-            modification_date: note.modificationDate().toLocaleString()
-        };
-        
-        return JSON.stringify(noteInfo);
-    } catch (error) {
-        return "{}";
-    }`
-  );
-
-  return JSON.parse(note as string) as {
-    title: string;
-    content: string;
-    creation_date: string;
-    modification_date: string;
-  };
-};
-
-// Update the indexNotes function to use the new converter
-// Update indexNotes to accept a limit parameter
-
-// Updated to use the new single fetch approach
-export const indexNotes = async (
-  notesTable: any,
-  deps = {
-    fetchAndIndexAllNotes
-  }
-) => {
-  console.log('Using new efficient single-fetch indexing approach...');
-  return await deps.fetchAndIndexAllNotes(notesTable);
 };
 
 // Helper function to create FTS index on chunk_content
@@ -659,39 +1068,254 @@ export const createNotesTableSmart = async (overrideName?: string, mode: 'fresh'
   }
 };
 
-// Smart indexing with updates - removed since we're now using the single fetch approach
-// This function has been replaced by fetchAndIndexAllNotes for better performance
+// Smart indexing with updates
+export const indexNotesIncremental = async (
+  notesTable: any,
+  existingNotes: Map<string, any>,
+  maxNotes?: number,
+  deps = { getNotes, getNoteDetailsByTitle }
+) => {
+  const start = performance.now();
+  let report = "";
+  let processed = 0;
+  let successful = 0;
+  let failed = 0;
+  let updated = 0;
+  let added = 0;
+  let skipped = 0;
+  let totalChunks = 0;
+  let allNotes: string[] = [];
+  
+  const isFreshMode = existingNotes.size === 0;
+  console.log(`📚 Smart indexing${maxNotes ? ` (max: ${maxNotes})` : ''} with update detection...`);
+  if (isFreshMode) {
+    console.log(`🆕 Fresh mode detected - all notes will be processed as new`);
+  }
+  
+  for await (const batch of deps.getNotes(maxNotes)) {
+    allNotes = [...allNotes, ...batch.titles];
+    console.log(`\n📦 Processing batch of ${batch.titles.length} notes (${batch.progress.current}/${batch.progress.total})`);
+    
+    // First pass: quick check which notes need processing
+    const notesToProcess = [];
+    const notesToSkip = [];
+    
+    for (const noteTitle of batch.titles) {
+      if (isFreshMode) {
+        // In fresh mode, process all notes as new
+        notesToProcess.push({ title: noteTitle, reason: 'new' });
+      } else {
+        const existingNote = existingNotes.get(noteTitle);
+        if (!existingNote) {
+          notesToProcess.push({ title: noteTitle, reason: 'new' });
+        } else {
+          // For existing notes, we'll need to fetch details to check modification date
+          notesToProcess.push({ title: noteTitle, reason: 'check' });
+        }
+      }
+    }
+    
+    console.log(`   🎯 Quick scan: ${notesToProcess.length} notes need ${isFreshMode ? 'processing (fresh mode)' : 'checking'}, ${notesToSkip.length} can be skipped immediately`);
+    
+    // Process in aggressive parallel batches for maximum performance
+    const PARALLEL_BATCH_SIZE = 15; // Increased from 10 to 15 for even faster processing
+    const notesToUpdate = [];
+    const notesToAdd = [];
+    
+    for (let i = 0; i < notesToProcess.length; i += PARALLEL_BATCH_SIZE) {
+      const parallelBatch = notesToProcess.slice(i, i + PARALLEL_BATCH_SIZE);
+      console.log(`   🔍 Processing parallel batch ${Math.floor(i/PARALLEL_BATCH_SIZE) + 1}/${Math.ceil(notesToProcess.length/PARALLEL_BATCH_SIZE)} (${parallelBatch.length} notes)`);
+      
+      const batchPromises = parallelBatch.map(async ({ title, reason }) => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 35000); // Increased from 20s to 35s for better reliability
+        
+        try {
+          const result = await Promise.race([
+            deps.getNoteDetailsByTitle(title),
+            new Promise((_, reject) => {
+              controller.signal.addEventListener('abort', () => 
+                reject(new Error('Note processing timed out after 35s'))
+              );
+            })
+          ]);
+          clearTimeout(timeout);
+          return { success: true, data: result, title, reason };
+        } catch (error) {
+          clearTimeout(timeout);
+          
+          // Add retry logic for timeouts
+          if (error.message.includes('timed out')) {
+            console.log(`     ⏰ "${title}" timed out, retrying with extended timeout...`);
+            try {
+              const retryController = new AbortController();
+              const retryTimeout = setTimeout(() => retryController.abort(), 120000); // Increased from 60s to 120s for retry
+              
+              const retryResult = await Promise.race([
+                deps.getNoteDetailsByTitle(title),
+                new Promise((_, reject) => {
+                  retryController.signal.addEventListener('abort', () => 
+                    reject(new Error('Note processing retry timed out after 120s'))
+                  );
+                })
+              ]);
+              
+              clearTimeout(retryTimeout);
+              console.log(`     ✅ "${title}" succeeded on retry`);
+              return { success: true, data: retryResult, title, reason };
+            } catch (retryError) {
+              console.log(`     ❌ "${title}" failed on retry: ${retryError.message}`);
+              return { success: false, error: retryError, title, reason };
+            }
+          }
+          
+          return { success: false, error, title, reason };
+        }
+      });
+      
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      // Process results
+      batchResults.forEach((result, idx) => {
+        const { title, reason } = parallelBatch[idx];
+        
+        if (result.status === 'fulfilled' && result.value.success) {
+          const noteDetails = result.value.data;
+          processed++;
+          successful++;
+          
+          if (isFreshMode) {
+            // In fresh mode, treat all notes as new
+            console.log(`     ✨ "${title}" (fresh mode) - will add`);
+            notesToAdd.push(noteDetails);
+            added++;
+          } else {
+            const existingNote = existingNotes.get(title);
+            
+            if (existingNote) {
+              // Check modification date
+              const existingModDate = new Date(existingNote.modification_date);
+              const currentModDate = new Date(noteDetails.modification_date);
+              
+              if (currentModDate > existingModDate) {
+                console.log(`     🔄 "${title}" was modified - will update`);
+                notesToUpdate.push(noteDetails);
+                updated++;
+              } else {
+                console.log(`     ⏭️ "${title}" unchanged - skipping`);
+                skipped++;
+              }
+            } else {
+              console.log(`     ✨ "${title}" is new - will add`);
+              notesToAdd.push(noteDetails);
+              added++;
+            }
+          }
+        } else {
+          failed++;
+          const error = result.status === 'fulfilled' ? result.value.error : result.reason;
+          console.log(`     ❌ Failed to process "${title}": ${error?.message || 'Unknown error'}`);
+          report += `Error processing note "${title}": ${error?.message || 'Unknown error'}\n`;
+        }
+      });
+      
+      // Slightly longer delay between parallel batches for stability
+      if (i + PARALLEL_BATCH_SIZE < notesToProcess.length) {
+        await new Promise(resolve => setTimeout(resolve, 15)); // Increased from 5ms to 15ms for better stability
+      }
+    }
+    
+    // Process updates and additions - CREATE CHUNKS PROPERLY
+    const allNotesToProcess = [...notesToUpdate, ...notesToAdd];
+    
+    if (allNotesToProcess.length > 0) {
+      console.log(`📥 Converting ${allNotesToProcess.length} notes to plain text and creating chunks...`);
+      
+      const allChunks = [];
+      
+      for (const note of allNotesToProcess) {
+        try {
+          const plainTextContent = htmlToPlainText(note.content || "");
+          const fullText = `${note.title}\n\n${plainTextContent}`;
+          
+          // Create chunks from the full text
+          const chunks = await createChunks(fullText);
+          console.log(`     📄 "${note.title}": ${chunks.length} chunks created`);
+          
+          // Create chunk records with chunk_content field
+          chunks.forEach((chunkContent, index) => {
+            allChunks.push({
+              title: note.title,
+              content: plainTextContent, // Keep full content for reference
+              creation_date: note.creation_date,
+              modification_date: note.modification_date,
+              chunk_index: index.toString(),
+              total_chunks: chunks.length.toString(),
+              chunk_content: chunkContent, // This is what gets embedded - CRITICAL FIELD
+            });
+          });
+          
+          totalChunks += chunks.length;
+          
+        } catch (error) {
+          console.log(`     ⚠️ Error processing note "${note.title}": ${error.message}`);
+          report += `Error processing note "${note.title}": ${error.message}\n`;
+          failed++;
+          successful--;
+        }
+      }
+
+      if (allChunks.length > 0) {
+        console.log(`💾 Adding ${allChunks.length} chunks to database...`);
+        
+        // Ultra-fast database insertion with maximum batch size
+        const DB_BATCH_SIZE = 100; // Increased from 25 to 100 for maximum speed
+        for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
+          const chunkBatch = allChunks.slice(i, i + DB_BATCH_SIZE);
+          await notesTable.add(chunkBatch);
+          console.log(`   📦 Added batch ${Math.floor(i/DB_BATCH_SIZE) + 1}/${Math.ceil(allChunks.length/DB_BATCH_SIZE)} (${chunkBatch.length} chunks)`);
+        }
+        
+        // Update our existing notes map (only relevant for incremental mode)
+        if (!isFreshMode) {
+          allNotesToProcess.forEach(note => {
+            existingNotes.set(note.title, {
+              modification_date: note.modification_date,
+              row: note
+            });
+          });
+        }
+        
+        console.log(`✅ Successfully added ${allChunks.length} chunks from ${allNotesToProcess.length} notes`);
+        
+      } else {
+        console.log(`⏭️ No chunks to add for this batch`);
+      }
+    } else {
+      console.log(`⏭️ No notes in this batch needed processing`);
+    }
+    
+    // Balanced pause between batches
+    await new Promise(resolve => setTimeout(resolve, 20)); // Increased from 10ms to 20ms for better stability
+  }
+
+  return {
+    chunks: totalChunks,
+    notes: successful, // This is the actual number of notes processed successfully
+    failed,
+    updated,
+    added,
+    skipped,
+    report,
+    allNotes: allNotes.length,
+    time: performance.now() - start,
+  };
+};
 
 export const createNotesTable = async (overrideName?: string) => {
   // Use the smart version with incremental mode by default
   return await createNotesTableSmart(overrideName, 'incremental');
 };
-
-const createNote = async (title: string, content: string) => {
-  // Escape special characters and convert newlines to \n
-  const escapedTitle = title.replace(/[\\'"]/g, "\\$&");
-  const escapedContent = content
-    .replace(/[\\'"]/g, "\\$&")
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "");
-
-  await runJxa(`
-    const app = Application('Notes');
-    const note = app.make({new: 'note', withProperties: {
-      name: "${escapedTitle}",
-      body: "${escapedContent}"
-    }});
-    
-    return true
-  `);
-
-  return true;
-};
-
-const CreateNoteSchema = z.object({
-  title: z.string(),
-  content: z.string(),
-});
 
 // Handle tool execution
 server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
@@ -700,9 +1324,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
 
   try {
     if (name === "create-note") {
-      const { title, content } = CreateNoteSchema.parse(args);
-      await createNote(title, content);
-      return createTextResponse(`Created note "${title}" successfully.`);
+      // Remove createNote functionality since it's not needed
+      return createTextResponse(`Create note functionality not implemented.`);
     } else if (name === "list-notes") {
       const totalChunks = await notesTable.countRows();
       // Get unique note titles to count actual notes
@@ -713,24 +1336,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
       );
     } else if (name == "get-note") {
       try {
-        const { title } = GetNoteSchema.parse(args);
-        const note = await getNoteDetailsByTitle(title);
+        const { title, creation_date } = GetNoteSchema.parse(args);
+        const note = await getNoteDetailsByTitle(title, creation_date);
 
         return createTextResponse(`${JSON.stringify(note, null, 2)}`);
       } catch (error) {
         return createTextResponse(error.message);
       }
     } else if (name === "index-notes") {
-      const { processed, totalChunks, failed, timeSeconds } = await indexNotes(notesTable);
+      const { time, chunks, notes, report, allNotes } = await indexNotes(notesTable);
       return createTextResponse(
-        `Successfully indexed ${processed} notes into ${totalChunks} chunks in ${timeSeconds.toFixed(1)}s.\n\n` +
+        `Successfully indexed ${notes} notes into ${chunks} chunks in ${(time/1000).toFixed(1)}s.\n\n` +
+        `📊 Summary:\n` +
+        `• Notes processed: ${notes}\n` +
+        `• Chunks created: ${chunks}\n` +
+        `• Average chunks per note: ${(chunks/notes).toFixed(1)}\n` +
+        `• Processing time: ${(time/1000).toFixed(1)} seconds\n\n` +
+        `✨ Your notes are now ready for semantic search using the "search-notes" tool!`
+      );
+    } else if (name === "index-notes-enhanced") {
+      const { processed, totalChunks, failed, timeSeconds } = await fetchAndIndexAllNotes(notesTable);
+      return createTextResponse(
+        `Successfully indexed ${processed} notes into ${totalChunks} chunks in ${timeSeconds.toFixed(1)}s using enhanced method.\n\n` +
         `📊 Summary:\n` +
         `• Notes processed: ${processed}\n` +
         `• Chunks created: ${totalChunks}\n` +
+        `• Failed: ${failed}\n` +
         `• Average chunks per note: ${(totalChunks/processed).toFixed(1)}\n` +
-        `• Processing time: ${timeSeconds.toFixed(1)} seconds\n` +
-        `• Failed: ${failed}\n\n` +
-        `✨ Your notes are now ready for semantic search using the "search-notes" tool!`
+        `• Processing time: ${timeSeconds.toFixed(1)} seconds\n\n` +
+        `✨ Enhanced indexing handles duplicate titles better by using creation dates!\n` +
+        `Your notes are now ready for semantic search using the "search-notes" tool!`
+      );
+    } else if (name === "index-notes-enhanced") {
+      const { processed, totalChunks, failed, timeSeconds } = await fetchAndIndexAllNotes(notesTable);
+      return createTextResponse(
+        `Successfully indexed ${processed} notes into ${totalChunks} chunks in ${timeSeconds.toFixed(1)}s using enhanced method.\n\n` +
+        `📊 Summary:\n` +
+        `• Notes processed: ${processed}\n` +
+        `• Chunks created: ${totalChunks}\n` +
+        `• Failed: ${failed}\n` +
+        `• Average chunks per note: ${(totalChunks/processed).toFixed(1)}\n` +
+        `• Processing time: ${timeSeconds.toFixed(1)} seconds\n\n` +
+        `✨ Your notes are now ready for semantic search using the "search-notes" tool!\n` +
+        `🎯 This enhanced method handles duplicate note titles by using creation dates for precise fetching.`
       );
     } else if (name === "search-notes") {
       const { query } = QueryNotesSchema.parse(args);
