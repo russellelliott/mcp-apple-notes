@@ -9,6 +9,7 @@ import * as lancedb from "@lancedb/lancedb";
 import { runJxa } from "run-jxa";
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs/promises";
 // Remove TurndownService import
 import {
   EmbeddingFunction,
@@ -22,6 +23,103 @@ import { pipeline } from "@huggingface/transformers";
 const db = await lancedb.connect(
   path.join(os.homedir(), ".mcp-apple-notes", "data")
 );
+
+// Path for notes cache file
+const NOTES_CACHE_PATH = path.join(os.homedir(), ".mcp-apple-notes", "notes-cache.json");
+
+// Types for note metadata
+interface NoteMetadata {
+  title: string;
+  creation_date: string;
+  modification_date: string;
+}
+
+interface NotesCache {
+  last_sync: string;
+  notes: NoteMetadata[];
+}
+
+// Utility functions for notes cache
+const loadNotesCache = async (): Promise<NotesCache | null> => {
+  try {
+    const cacheContent = await fs.readFile(NOTES_CACHE_PATH, 'utf8');
+    return JSON.parse(cacheContent);
+  } catch (error) {
+    console.log(`📁 No existing cache file found or error reading it`);
+    return null;
+  }
+};
+
+const saveNotesCache = async (notes: NoteMetadata[]): Promise<void> => {
+  try {
+    // Ensure directory exists
+    const cacheDir = path.dirname(NOTES_CACHE_PATH);
+    await fs.mkdir(cacheDir, { recursive: true });
+    
+    const cache: NotesCache = {
+      last_sync: new Date().toISOString(),
+      notes: notes
+    };
+    
+    await fs.writeFile(NOTES_CACHE_PATH, JSON.stringify(cache, null, 2));
+    console.log(`💾 Saved ${notes.length} notes to cache file`);
+    console.log(`📅 Cache timestamp: ${cache.last_sync}`);
+    
+    // Show a sample of what's being cached
+    if (notes.length > 0) {
+      console.log(`📝 Sample cached notes:`);
+      notes.slice(0, 3).forEach((note, idx) => {
+        console.log(`   ${idx + 1}. "${note.title}" (created: ${note.creation_date}, modified: ${note.modification_date})`);
+      });
+      if (notes.length > 3) {
+        console.log(`   ... and ${notes.length - 3} more notes`);
+      }
+    }
+  } catch (error) {
+    console.log(`⚠️ Failed to save cache file: ${(error as Error).message}`);
+  }
+};
+
+// Helper to identify new/modified notes
+const identifyChangedNotes = (currentNotes: NoteMetadata[], cachedNotes: NoteMetadata[]): {
+  newNotes: NoteMetadata[];
+  modifiedNotes: NoteMetadata[];
+  unchangedNotes: NoteMetadata[];
+} => {
+  const cachedMap = new Map<string, { creation_date: string; modification_date: string }>(); // title -> dates
+  
+  cachedNotes.forEach(note => {
+    cachedMap.set(note.title, {
+      creation_date: note.creation_date,
+      modification_date: note.modification_date
+    });
+  });
+  
+  const newNotes: NoteMetadata[] = [];
+  const modifiedNotes: NoteMetadata[] = [];
+  const unchangedNotes: NoteMetadata[] = [];
+  
+  currentNotes.forEach(note => {
+    const cached = cachedMap.get(note.title);
+    
+    if (!cached) {
+      // New note (not in cache)
+      newNotes.push(note);
+    } else if (cached.modification_date !== note.modification_date) {
+      // Modified note (modification date changed)
+      modifiedNotes.push(note);
+    } else if (cached.creation_date !== note.creation_date) {
+      // Edge case: creation date changed (shouldn't happen but handle it)
+      console.log(`⚠️ Note "${note.title}" has different creation date - treating as modified`);
+      modifiedNotes.push(note);
+    } else {
+      // Unchanged note
+      unchangedNotes.push(note);
+    }
+  });
+  
+  return { newNotes, modifiedNotes, unchangedNotes };
+};
 
 // Update to better embedding model
 const extractor = await pipeline(
@@ -338,6 +436,10 @@ const GetNoteSchema = z.object({
   creation_date: z.string().optional(),
 });
 
+const IndexNotesSchema = z.object({
+  mode: z.enum(["fresh", "incremental"]).optional().default("incremental"),
+});
+
 export const server = new Server(
   {
     name: "my-apple-notes-mcp",
@@ -377,10 +479,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "index-notes",
         description:
-          "Index all my Apple Notes for Semantic Search using enhanced method that handles duplicate note titles better. Please tell the user that the sync takes couple of seconds up to couple of minutes depending on how many notes you have.",
+          "Index all my Apple Notes for Semantic Search using enhanced method that handles duplicate note titles better. Uses incremental mode by default to only process new/modified notes. Please tell the user that the sync takes couple of seconds up to couple of minutes depending on how many notes you have.",
         inputSchema: {
           type: "object",
-          properties: {},
+          properties: {
+            mode: {
+              type: "string",
+              enum: ["fresh", "incremental"],
+              description: "fresh: reindex all notes from scratch, incremental: only process new/modified notes",
+              default: "incremental"
+            }
+          },
           required: [],
         },
       },
@@ -640,13 +749,13 @@ const getNoteByTitleAndDate = async (title: string, creationDate: string) => {
 };
 
 // Enhanced fetchAndIndexAllNotes function that fetches by title and creation date
-export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) => {
+export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, mode: 'fresh' | 'incremental' = 'incremental') => {
   const start = performance.now();
   
-  console.log(`Starting full notes fetch and indexing${maxNotes ? ` (max: ${maxNotes} notes)` : ''}...`);
+  console.log(`Starting notes fetch and indexing${maxNotes ? ` (max: ${maxNotes} notes)` : ''} in ${mode} mode...`);
   
-  // Step 1: First fetch all titles and creation dates
-  console.log('\nStep 1: Fetching note titles and creation dates...');
+  // Step 1: First fetch all titles, creation dates, and modification dates
+  console.log('\nStep 1: Fetching note titles, creation dates, and modification dates...');
   
   const noteTitlesData = await runJxa(`
     const app = Application('Notes');
@@ -666,7 +775,8 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) 
         const note = notes[i];
         noteTitles.push({
           title: note.name(),
-          creation_date: note.creationDate().toLocaleString()
+          creation_date: note.creationDate().toLocaleString(),
+          modification_date: note.modificationDate().toLocaleString()
         });
         
         if ((i + 1) % 100 === 0) {
@@ -683,11 +793,86 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) 
   const noteTitles = JSON.parse(noteTitlesData as string) as Array<{
     title: string;
     creation_date: string;
+    modification_date: string;
   }>;
   console.log(`Fetched ${noteTitles.length} note titles in ${((performance.now() - start)/1000).toFixed(1)}s`);
   
-  // Step 2: Fetch each note by title AND creation date
-  console.log('\nStep 2: Fetching full note content by title and creation date...');
+  // Step 2: Determine which notes to process based on mode
+  let notesToProcess: NoteMetadata[] = noteTitles;
+  let skippedCount = 0;
+  
+  if (mode === 'incremental') {
+    console.log('\nStep 2: Comparing with cached notes to find changes...');
+    
+    const cachedNotes = await loadNotesCache();
+    
+    if (cachedNotes) {
+      console.log(`📂 Found cache with ${cachedNotes.notes.length} notes from ${cachedNotes.last_sync}`);
+      
+      const { newNotes, modifiedNotes, unchangedNotes } = identifyChangedNotes(noteTitles, cachedNotes.notes);
+      
+      console.log(`📊 Change analysis:`);
+      console.log(`  • New notes: ${newNotes.length}`);
+      console.log(`  • Modified notes: ${modifiedNotes.length}`);
+      console.log(`  • Unchanged notes: ${unchangedNotes.length}`);
+      
+      // Show details of new notes
+      if (newNotes.length > 0) {
+        console.log(`\n🆕 New notes detected:`);
+        newNotes.slice(0, 10).forEach((note, idx) => {
+          console.log(`  ${idx + 1}. "${note.title}" (created: ${note.creation_date}, modified: ${note.modification_date})`);
+        });
+        if (newNotes.length > 10) {
+          console.log(`  ... and ${newNotes.length - 10} more new notes`);
+        }
+      }
+      
+      // Show details of modified notes
+      if (modifiedNotes.length > 0) {
+        console.log(`\n✏️ Modified notes detected:`);
+        modifiedNotes.slice(0, 10).forEach((note, idx) => {
+          const cached = cachedNotes.notes.find(c => c.title === note.title);
+          console.log(`  ${idx + 1}. "${note.title}"`);
+          console.log(`      Created: ${note.creation_date}`);
+          console.log(`      Modified: ${cached?.modification_date} → ${note.modification_date}`);
+        });
+        if (modifiedNotes.length > 10) {
+          console.log(`  ... and ${modifiedNotes.length - 10} more modified notes`);
+        }
+      }
+      
+      notesToProcess = [...newNotes, ...modifiedNotes];
+      skippedCount = unchangedNotes.length;
+      
+      if (notesToProcess.length === 0) {
+        console.log(`✨ No changes detected! All notes are up to date.`);
+        // Still save the cache to update last_sync time
+        await saveNotesCache(noteTitles);
+        return { processed: 0, totalChunks: 0, failed: 0, skipped: skippedCount, timeSeconds: (performance.now() - start) / 1000 };
+      }
+      
+      // Remove old chunks for modified notes from database
+      if (modifiedNotes.length > 0) {
+        console.log(`\n🗑️ Removing old chunks for ${modifiedNotes.length} modified notes...`);
+        for (const modNote of modifiedNotes) {
+          try {
+            // Delete existing chunks for this note
+            await notesTable.delete(`title = '${modNote.title.replace(/'/g, "''")}'`);
+            console.log(`   ✅ Removed old chunks for "${modNote.title}"`);
+          } catch (error) {
+            console.log(`   ⚠️ Could not remove old chunks for "${modNote.title}": ${(error as Error).message}`);
+          }
+        }
+      }
+    } else {
+      console.log(`📁 No cache found, processing all ${noteTitles.length} notes`);
+    }
+  } else {
+    console.log(`\nStep 2: Fresh mode - processing all ${noteTitles.length} notes`);
+  }
+  
+  // Step 3: Fetch content for notes that need processing
+  console.log(`\nStep 3: Fetching full note content for ${notesToProcess.length} notes...`);
   
   const allNotes: Array<{
     title: string;
@@ -699,25 +884,33 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) 
   let fetchProgress = 0;
   const batchSize = 50; // Process in batches for better performance
   
-  for (let i = 0; i < noteTitles.length; i += batchSize) {
-    const batch = noteTitles.slice(i, i + batchSize);
+  for (let i = 0; i < notesToProcess.length; i += batchSize) {
+    const batch = notesToProcess.slice(i, i + batchSize);
     const batchNum = Math.floor(i / batchSize) + 1;
-    const totalBatches = Math.ceil(noteTitles.length / batchSize);
+    const totalBatches = Math.ceil(notesToProcess.length / batchSize);
     
     console.log(`\n📦 Processing batch ${batchNum}/${totalBatches} (${batch.length} notes):`);
     
     // Fetch batch in parallel
     const batchResults = await Promise.all(
-      batch.map(async ({ title, creation_date }, index) => {
+      batch.map(async ({ title, creation_date, modification_date }, index) => {
         try {
-          console.log(`   📄 [${batchNum}.${index + 1}] Fetching: "${title}" (${creation_date})`);
+          console.log(`   📄 [${batchNum}.${index + 1}] Fetching: "${title}"`);
+          console.log(`       Created: ${creation_date}`);
+          console.log(`       Modified: ${modification_date}`);
           const result = await getNoteByTitleAndDate(title, creation_date);
           if (result) {
             console.log(`   ✅ [${batchNum}.${index + 1}] Success: "${title}"`);
+            return {
+              title: result.title,
+              content: result.content,
+              creation_date: result.creation_date,
+              modification_date: modification_date // Use the fresh modification date
+            };
           } else {
             console.log(`   ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}"`);
           }
-          return result;
+          return null;
         } catch (error) {
           console.log(`   ❌ [${batchNum}.${index + 1}] Failed: "${title}" - ${(error as Error).message}`);
           return null;
@@ -735,15 +928,15 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) 
     fetchProgress += batch.length;
     console.log(`📊 Batch ${batchNum} complete: ${batchResults.filter(r => r !== null).length}/${batch.length} successful`);
     
-    if (fetchProgress % 100 === 0 || fetchProgress === noteTitles.length) {
-      console.log(`🎯 Overall progress: ${fetchProgress}/${noteTitles.length} notes processed`);
+    if (fetchProgress % 100 === 0 || fetchProgress === notesToProcess.length) {
+      console.log(`🎯 Overall progress: ${fetchProgress}/${notesToProcess.length} notes processed`);
     }
   }
   
   console.log(`Fetched ${allNotes.length} complete notes in ${((performance.now() - start)/1000).toFixed(1)}s`);
   
-  // Step 3: Process into chunks and add to database
-  console.log('\nStep 3: Processing notes into chunks...');
+  // Step 4: Process into chunks and add to database
+  console.log(`\nStep 4: Processing notes into chunks...`);
   
   let totalChunks = 0;
   let processed = 0;
@@ -792,10 +985,10 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) 
     }
   }
   
-  // Step 4: Add to database in batches
+  // Step 5: Add to database in batches
   const DB_BATCH_SIZE = 100;
   
-  console.log(`\nStep 4: Adding ${allChunks.length} chunks to database...`);
+  console.log(`\nStep 5: Adding ${allChunks.length} chunks to database...`);
   console.log(`💡 Using batch size of ${DB_BATCH_SIZE} chunks per database write for optimal performance.`);
   
   const totalBatches = Math.ceil(allChunks.length / DB_BATCH_SIZE);
@@ -816,11 +1009,18 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number) 
     }
   }
   
+  // Step 6: Save updated cache
+  console.log(`\nStep 6: Updating notes cache...`);
+  await saveNotesCache(noteTitles);
+  
   const totalTime = (performance.now() - start) / 1000;
   
-  console.log(`\nComplete! ${processed} notes → ${totalChunks} chunks in ${totalTime.toFixed(1)}s`);
+  console.log(`\n✨ Complete! ${processed} notes → ${totalChunks} chunks in ${totalTime.toFixed(1)}s`);
+  if (skippedCount > 0) {
+    console.log(`⏩ Skipped ${skippedCount} unchanged notes (incremental mode)`);
+  }
   
-  return { processed, totalChunks, failed, timeSeconds: totalTime };
+  return { processed, totalChunks, failed, skipped: skippedCount, timeSeconds: totalTime };
 };
 
 // Helper function to create FTS index on chunk_content
@@ -936,18 +1136,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
       }
     } else if (name === "index-notes") {
       // Use the enhanced method by default for better reliability
-      const { processed, totalChunks, failed, timeSeconds } = await fetchAndIndexAllNotes(notesTable);
-      return createTextResponse(
-        `Successfully indexed ${processed} notes into ${totalChunks} chunks in ${timeSeconds.toFixed(1)}s using enhanced method.\n\n` +
+      const { mode } = IndexNotesSchema.parse(args);
+      const { processed, totalChunks, failed, skipped, timeSeconds } = await fetchAndIndexAllNotes(notesTable, undefined, mode);
+      
+      let message = `Successfully indexed ${processed} notes into ${totalChunks} chunks in ${timeSeconds.toFixed(1)}s using enhanced method.\n\n` +
         `📊 Summary:\n` +
         `• Notes processed: ${processed}\n` +
         `• Chunks created: ${totalChunks}\n` +
-        `• Failed: ${failed}\n` +
-        `• Average chunks per note: ${(totalChunks/processed).toFixed(1)}\n` +
-        `• Processing time: ${timeSeconds.toFixed(1)} seconds\n\n` +
-        `✨ Enhanced indexing handles duplicate titles better by using creation dates!\n` +
-        `Your notes are now ready for semantic search using the "search-notes" tool!`
-      );
+        `• Failed: ${failed}\n`;
+      
+      if (skipped > 0) {
+        message += `• Skipped unchanged: ${skipped}\n`;
+      }
+      
+      message += `• Average chunks per note: ${processed > 0 ? (totalChunks/processed).toFixed(1) : '0'}\n` +
+        `• Processing time: ${timeSeconds.toFixed(1)} seconds\n` +
+        `• Mode: ${mode}\n\n` +
+        `✨ Enhanced indexing handles duplicate titles better by using creation dates!\n`;
+      
+      if (mode === 'incremental' && skipped > 0) {
+        message += `⚡ Incremental mode: Only processed new/modified notes. ${skipped} notes unchanged.\n`;
+      }
+      
+      message += `Your notes are now ready for semantic search using the "search-notes" tool!`;
+      
+      return createTextResponse(message);
     } else if (name === "index-notes-enhanced") {
       const { processed, totalChunks, failed, timeSeconds } = await fetchAndIndexAllNotes(notesTable);
       return createTextResponse(

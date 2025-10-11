@@ -1,11 +1,27 @@
-# Index only 10 notes for testing using enhanced method
-#bun cli.ts --max=100
+#!/bin/bash
 
-# Create table from scratch, but only with 200 notes using enhanced method
-#bun cli.ts --max=200 --mode=fresh
+# Enhanced Apple Notes MCP Server CLI
+# 
+# This script runs the enhanced indexing method that:
+# - Fetches all note titles, creation dates, and modification dates first
+# - Then fetches full content by precise title+date matching
+# - Supports incremental updates to only process new/modified notes
+# - Handles duplicate note titles better than the original method
+# - Includes detailed logging showing progress through batches
+# - Caches note metadata to enable fast incremental updates
+#
+# Usage Examples:
 
-# Create table from scratch, go over all notes using enhanced method
+# Incremental mode (default) - only process new/modified notes
+# bun cli.ts
+
+# Fresh rebuild mode - reindex all notes from scratch
 # bun cli.ts --mode=fresh
 
-# start with small amount of notes to make sure it works; start from scratch using enhanced method
-bun cli.ts --max=10 --mode=fresh
+# Test with limited notes
+# bun cli.ts --max=10 --mode=fresh
+
+# Incremental update with limit (for testing)
+# bun cli.ts --max=100
+
+bun cli.ts --max=10
