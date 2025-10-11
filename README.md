@@ -477,3 +477,7 @@ https://discourse.hookproductivity.com/t/using-the-built-in-notes-url-scheme/607
 it might be something to look into? would need full disk access. the method with just doing it by title works without full disk access.
 - honestly seems like alot of effort. the solution i have right now is sufficient
 - if i really wanted to, i could somehow track the number of notes with a given title, then add those one by one?
+
+This approach is better, especially when more than one note has the same title.
+
+https://claude.ai/chat/815696fc-ca9e-4bc5-a3d5-1e3c71fe9f57
