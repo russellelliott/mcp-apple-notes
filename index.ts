@@ -516,7 +516,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["query"],
         },
       },
-      // Remove create-note tool since it's not needed
+      {
+        name: "create-note",
+        description:
+          "Create a new Apple Note with specified title and content. Must be in HTML format WITHOUT newlines",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: { type: "string" },
+            content: { type: "string" },
+          },
+          required: ["title", "content"],
+        },
+      }
     ],
   };
 });
