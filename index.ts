@@ -144,7 +144,7 @@ const identifyChangedNotes = (currentNotes: NoteMetadata[], cachedNotes: NoteMet
 // ============================
 
 // Aggregate chunks to note-level embeddings for clustering
-const aggregateChunksToNotes = async (notesTable: any) => {
+export const aggregateChunksToNotes = async (notesTable: any) => {
   console.log("📊 Aggregating chunks to note-level embeddings for clustering...");
   
   // Get all chunks from database
@@ -168,8 +168,21 @@ const aggregateChunksToNotes = async (notesTable: any) => {
       });
     }
     
-    if (Array.isArray(chunk.vector) && chunk.vector.length > 0) {
-      noteMap.get(noteKey).vectors.push(chunk.vector);
+    // LanceDB stores vectors as Vector objects, convert to array
+    let vectorArray = null;
+    if (chunk.vector) {
+      if (typeof chunk.vector.toArray === 'function') {
+        // Use toArray method and convert to regular array
+        const typedArray = chunk.vector.toArray();
+        vectorArray = Array.from(typedArray);
+      } else if (Symbol.iterator in chunk.vector) {
+        // Fall back to Array.from if iterable
+        vectorArray = Array.from(chunk.vector);
+      }
+    }
+    
+    if (vectorArray && Array.isArray(vectorArray) && vectorArray.length > 0) {
+      noteMap.get(noteKey).vectors.push(vectorArray);
       noteMap.get(noteKey).chunks.push({
         index: chunk.chunk_index,
         content: chunk.chunk_content
