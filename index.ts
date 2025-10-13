@@ -19,6 +19,10 @@ import {
 import { type Float, Float32, Utf8 } from "apache-arrow";
 import { pipeline } from "@huggingface/transformers";
 
+// Install with: bun add density-clustering
+// For density-based clustering (using DBSCAN since HDBSCAN is not available)
+import { DBSCAN } from "density-clustering";
+
 // Remove the turndown instance
 const db = await lancedb.connect(
   path.join(os.homedir(), ".mcp-apple-notes", "data")
@@ -37,6 +41,21 @@ interface NoteMetadata {
 interface NotesCache {
   last_sync: string;
   notes: NoteMetadata[];
+}
+
+interface ChunkData {
+  title: string;
+  content: string;
+  creation_date: string;
+  modification_date: string;
+  chunk_index: string;
+  total_chunks: string;
+  chunk_content: string;
+  cluster_id: string;
+  cluster_label: string;
+  cluster_confidence: string;
+  cluster_summary: string;
+  last_clustered: string;
 }
 
 // Utility functions for notes cache
@@ -119,6 +138,290 @@ const identifyChangedNotes = (currentNotes: NoteMetadata[], cachedNotes: NoteMet
   });
   
   return { newNotes, modifiedNotes, unchangedNotes };
+};
+
+// HDBSCAN Clustering Functions
+// ============================
+
+// Aggregate chunks to note-level embeddings for clustering
+const aggregateChunksToNotes = async (notesTable: any) => {
+  console.log("📊 Aggregating chunks to note-level embeddings for clustering...");
+  
+  // Get all chunks from database
+  const allChunks = await notesTable.search("").limit(100000).toArray();
+  console.log(`📄 Found ${allChunks.length} chunks to aggregate`);
+  
+  // Group by note (using title + creation_date as unique key)
+  const noteMap = new Map();
+  
+  for (const chunk of allChunks) {
+    const noteKey = `${chunk.title}|||${chunk.creation_date}`;
+    
+    if (!noteMap.has(noteKey)) {
+      noteMap.set(noteKey, {
+        title: chunk.title,
+        creation_date: chunk.creation_date,
+        modification_date: chunk.modification_date,
+        content: chunk.content,
+        vectors: [],
+        chunks: []
+      });
+    }
+    
+    if (Array.isArray(chunk.vector) && chunk.vector.length > 0) {
+      noteMap.get(noteKey).vectors.push(chunk.vector);
+      noteMap.get(noteKey).chunks.push({
+        index: chunk.chunk_index,
+        content: chunk.chunk_content
+      });
+    }
+  }
+  
+  // Create note-level embeddings by averaging chunk vectors
+  const noteEmbeddings = Array.from(noteMap.values())
+    .filter(note => note.vectors.length > 0)
+    .map(note => {
+      // Average all chunk vectors for this note
+      const avgVector = note.vectors[0].map((_, dimIdx) => 
+        note.vectors.reduce((sum, vec) => sum + vec[dimIdx], 0) / note.vectors.length
+      );
+      
+      return {
+        ...note,
+        embedding: avgVector,
+        numChunks: note.vectors.length
+      };
+    });
+  
+  console.log(`✅ Aggregated into ${noteEmbeddings.length} notes with embeddings`);
+  return noteEmbeddings;
+};
+
+// DBSCAN clustering using density-clustering library
+// Note: DBSCAN is similar to HDBSCAN but uses fixed epsilon distance
+const runDBSCAN = (vectors: number[][], minClusterSize = 10, epsilon = 0.3) => {
+  console.log(`🔬 Running DBSCAN clustering (epsilon=${epsilon}, min_samples=${minClusterSize})...`);
+  
+  const dbscan = new DBSCAN();
+  
+  // Run DBSCAN clustering
+  // DBSCAN parameters: dataset, epsilon (neighborhood distance), minPts (minimum points)
+  const clusters = dbscan.run(vectors, epsilon, minClusterSize);
+  
+  // DBSCAN returns arrays of point indices for each cluster, need to convert to labels
+  const labels = new Array(vectors.length).fill(-1); // -1 = noise/outlier
+  
+  clusters.forEach((cluster, clusterId) => {
+    if (Array.isArray(cluster)) {
+      cluster.forEach((pointIndex) => {
+        labels[pointIndex] = clusterId;
+      });
+    }
+  });
+  
+  const totalClusters = clusters.length;
+  const outliers = labels.filter((l) => l === -1).length;
+  
+  console.log(`✅ DBSCAN found ${totalClusters} clusters, ${outliers} outliers`);
+  return labels;
+};
+
+// Main clustering function
+export const clusterNotes = async (
+  notesTable: any,
+  minClusterSize = 10,
+  epsilon = 0.3
+) => {
+  const start = performance.now();
+  console.log(`🔬 Starting note clustering...`);
+  
+  // Step 1: Aggregate chunks to note-level embeddings
+  const noteEmbeddings = await aggregateChunksToNotes(notesTable);
+  
+  if (noteEmbeddings.length === 0) {
+    throw new Error("No notes with embeddings found");
+  }
+  
+  // Step 2: Extract vectors for clustering
+  const vectors = noteEmbeddings.map(n => n.embedding);
+  
+  // Step 3: Run clustering
+  const clusterLabels = runDBSCAN(vectors, minClusterSize, epsilon);
+  
+  // Step 4: Group notes by cluster
+  const clusters = new Map();
+  clusterLabels.forEach((clusterId, idx) => {
+    if (!clusters.has(clusterId)) {
+      clusters.set(clusterId, []);
+    }
+    clusters.get(clusterId).push({
+      ...noteEmbeddings[idx],
+      cluster_id: clusterId
+    });
+  });
+  
+  // Step 5: Generate cluster labels and summaries
+  const clusterSummaries = new Map();
+  for (const [clusterId, notes] of clusters.entries()) {
+    if (clusterId === -1) {
+      clusterSummaries.set(clusterId, {
+        label: "Uncategorized",
+        summary: "Notes that don't fit into any specific cluster",
+        confidence: "0.0"
+      });
+    } else {
+      // Simple label generation based on most common words in titles
+      const allTitles = notes.map(n => n.title).join(' ');
+      const words = allTitles.toLowerCase()
+        .replace(/[^\w\s]/g, '')
+        .split(/\s+/)
+        .filter(word => word.length > 3);
+      
+      const wordCounts = words.reduce((acc, word) => {
+        acc[word] = (acc[word] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+      
+      const topWords = Object.entries(wordCounts)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 2)
+        .map(([word]) => word);
+      
+      clusterSummaries.set(clusterId, {
+        label: topWords.length > 0 ? topWords.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : `Cluster ${clusterId}`,
+        summary: `${notes.length} notes related to ${topWords.join(', ')}`,
+        confidence: "0.8"
+      });
+    }
+  }
+  
+  // Step 6: Update ALL chunks with cluster information
+  console.log(`💾 Updating database with cluster assignments...`);
+  
+  for (const [clusterId, notes] of clusters.entries()) {
+    const clusterInfo = clusterSummaries.get(clusterId)!;
+    
+    for (const note of notes) {
+      try {
+        // Update all chunks belonging to this note
+        await notesTable.update({
+          where: `title = '${note.title.replace(/'/g, "''")}' AND creation_date = '${note.creation_date}'`,
+          values: {
+            cluster_id: clusterId.toString(),
+            cluster_label: clusterInfo.label,
+            cluster_confidence: clusterInfo.confidence,
+            cluster_summary: clusterInfo.summary,
+            last_clustered: new Date().toISOString()
+          }
+        });
+        
+        console.log(`   ✅ Updated "${note.title}" → Cluster ${clusterId} (${clusterInfo.label})`);
+      } catch (error) {
+        console.log(`   ⚠️ Failed to update "${note.title}": ${(error as Error).message}`);
+      }
+    }
+  }
+  
+  const totalTime = (performance.now() - start) / 1000;
+  const validClusters = clusters.size - (clusters.has(-1) ? 1 : 0);
+  const outliers = clusters.get(-1)?.length || 0;
+  
+  console.log(`\n✨ Clustering complete in ${totalTime.toFixed(1)}s!`);
+  console.log(`📊 Results:`);
+  console.log(`  • Valid clusters: ${validClusters}`);
+  console.log(`  • Outlier notes: ${outliers}`);
+  console.log(`  • Total notes processed: ${noteEmbeddings.length}`);
+  
+  return {
+    totalClusters: validClusters,
+    outliers,
+    totalNotes: noteEmbeddings.length,
+    clusterSizes: Array.from(clusters.entries())
+      .filter(([id]) => id >= 0)
+      .map(([id, notes]) => ({
+        id,
+        label: clusterSummaries.get(id)?.label,
+        size: notes.length
+      }))
+      .sort((a, b) => b.size - a.size),
+    timeSeconds: totalTime
+  };
+};
+
+// Get all notes in a specific cluster
+export const getNotesInCluster = async (notesTable: any, clusterId: string) => {
+  console.log(`📂 Fetching notes in cluster ${clusterId}...`);
+  
+  // Fetch all chunks with this cluster_id
+  const chunks = await notesTable
+    .search("")
+    .where(`cluster_id = '${clusterId}'`)
+    .toArray();
+  
+  // Group chunks back into unique notes
+  const notesMap = new Map();
+  
+  for (const chunk of chunks) {
+    const noteKey = `${chunk.title}|||${chunk.creation_date}`;
+    
+    if (!notesMap.has(noteKey)) {
+      notesMap.set(noteKey, {
+        title: chunk.title,
+        content: chunk.content,
+        creation_date: chunk.creation_date,
+        modification_date: chunk.modification_date,
+        cluster_id: chunk.cluster_id,
+        cluster_label: chunk.cluster_label,
+        cluster_confidence: chunk.cluster_confidence,
+        cluster_summary: chunk.cluster_summary,
+        total_chunks: parseInt(chunk.total_chunks || '1')
+      });
+    }
+  }
+  
+  const notes = Array.from(notesMap.values());
+  console.log(`✅ Found ${notes.length} notes in cluster ${clusterId}`);
+  
+  return notes;
+};
+
+// List all clusters with counts
+export const listClusters = async (notesTable: any) => {
+  console.log(`📊 Listing all clusters...`);
+  
+  const chunks = await notesTable
+    .search("")
+    .select(["cluster_id", "cluster_label", "cluster_summary", "title", "creation_date"])
+    .where("cluster_id IS NOT NULL")
+    .toArray();
+  
+  // Group by cluster
+  const clusterMap = new Map();
+  
+  for (const chunk of chunks) {
+    if (!clusterMap.has(chunk.cluster_id)) {
+      clusterMap.set(chunk.cluster_id, {
+        id: chunk.cluster_id,
+        label: chunk.cluster_label || 'Unknown',
+        summary: chunk.cluster_summary || '',
+        notes: new Set()
+      });
+    }
+    
+    clusterMap.get(chunk.cluster_id).notes.add(`${chunk.title}|||${chunk.creation_date}`);
+  }
+  
+  // Convert to array with counts
+  const clusters = Array.from(clusterMap.values()).map(cluster => ({
+    cluster_id: cluster.id,
+    cluster_label: cluster.label,
+    cluster_summary: cluster.summary,
+    note_count: cluster.notes.size
+  })).sort((a, b) => b.note_count - a.note_count);
+  
+  console.log(`✅ Found ${clusters.length} clusters`);
+  
+  return clusters;
 };
 
 // Update to better embedding model
@@ -415,7 +718,7 @@ const htmlToPlainText = (html: string): string => {
 
 const func = new OnDeviceEmbeddingFunction();
 
-// Updated schema to include chunk information - fix the embedding field
+// Updated schema to include chunk information and clustering fields
 const notesTableSchema = LanceSchema({
   title: new Utf8(), // Regular field, not for embedding
   content: new Utf8(), // Regular field, not for embedding  
@@ -425,6 +728,13 @@ const notesTableSchema = LanceSchema({
   total_chunks: new Utf8(), // Regular field
   chunk_content: func.sourceField(new Utf8()), // This is the field that gets embedded
   vector: func.vectorField(), // This stores the embeddings
+  
+  // NEW: Clustering fields (same value for all chunks of the same note)
+  cluster_id: new Utf8(), // -1 for outliers, 0+ for cluster ID (using string to handle -1)
+  cluster_label: new Utf8(), // Human-readable name like "Work Projects", "Python Development"
+  cluster_confidence: new Utf8(), // How strongly this note belongs to the cluster (0.0-1.0)
+  cluster_summary: new Utf8(), // Auto-generated description of what this cluster contains
+  last_clustered: new Utf8(), // ISO timestamp when clustering was last run
 });
 
 const QueryNotesSchema = z.object({
@@ -439,6 +749,17 @@ const GetNoteSchema = z.object({
 const IndexNotesSchema = z.object({
   mode: z.enum(["fresh", "incremental"]).optional().default("incremental"),
 });
+
+const ClusterNotesSchema = z.object({
+  min_cluster_size: z.number().optional().default(10),
+  epsilon: z.number().optional().default(0.3),
+});
+
+const GetClusterSchema = z.object({
+  cluster_id: z.string(),
+});
+
+const ListClustersSchema = z.object({});
 
 export const server = new Server(
   {
@@ -514,6 +835,49 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             query: z.string(),
           },
           required: ["query"],
+        },
+      },
+      {
+        name: "cluster-notes",
+        description: "Run DBSCAN clustering on all notes to automatically group similar notes together. This analyzes note content to create meaningful clusters using density-based clustering.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            min_cluster_size: {
+              type: "number",
+              description: "Minimum number of notes required to form a cluster (default: 10)",
+              default: 10
+            },
+            epsilon: {
+              type: "number", 
+              description: "Maximum distance between points in a cluster (default: 0.3, smaller = tighter clusters)",
+              default: 0.3
+            }
+          },
+          required: [],
+        },
+      },
+      {
+        name: "list-clusters",
+        description: "List all note clusters with their labels, summaries, and note counts",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      },
+      {
+        name: "get-cluster-notes",
+        description: "Get all notes belonging to a specific cluster",
+        inputSchema: {
+          type: "object",
+          properties: {
+            cluster_id: {
+              type: "string",
+              description: "ID of the cluster to retrieve notes from (use -1 for uncategorized notes)"
+            }
+          },
+          required: ["cluster_id"],
         },
       },
       {
@@ -953,15 +1317,7 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   let totalChunks = 0;
   let processed = 0;
   let failed = 0;
-  const allChunks: Array<{
-    title: string;
-    content: string;
-    creation_date: string;
-    modification_date: string;
-    chunk_index: string;
-    total_chunks: string;
-    chunk_content: string;
-  }> = [];
+  const allChunks: ChunkData[] = [];
   
   for (const note of allNotes) {
     try {
@@ -982,6 +1338,12 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
           chunk_index: index.toString(),
           total_chunks: chunks.length.toString(),
           chunk_content: chunkContent,
+          // Initialize cluster fields as empty - will be populated when clustering is run
+          cluster_id: "",
+          cluster_label: "",
+          cluster_confidence: "",
+          cluster_summary: "",
+          last_clustered: "",
         });
       });
       
@@ -1173,6 +1535,95 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
       message += `Your notes are now ready for semantic search using the "search-notes" tool!`;
       
       return createTextResponse(message);
+    } else if (name === "cluster-notes") {
+      // Run DBSCAN clustering on all notes
+      const { min_cluster_size, epsilon } = ClusterNotesSchema.parse(args);
+      
+      try {
+        const result = await clusterNotes(notesTable, min_cluster_size, epsilon);
+        
+        let message = `Successfully clustered ${result.totalNotes} notes in ${result.timeSeconds.toFixed(1)}s!\n\n`;
+        message += `📊 Clustering Results:\n`;
+        message += `• Total clusters: ${result.totalClusters}\n`;
+        message += `• Uncategorized notes: ${result.outliers}\n`;
+        message += `• Parameters: min_cluster_size=${min_cluster_size}, epsilon=${epsilon}\n\n`;
+        
+        if (result.clusterSizes.length > 0) {
+          message += `🏷️ Top clusters by size:\n`;
+          result.clusterSizes.slice(0, 10).forEach((cluster, idx) => {
+            message += `  ${idx + 1}. "${cluster.label}" (${cluster.size} notes)\n`;
+          });
+          
+          if (result.clusterSizes.length > 10) {
+            message += `  ... and ${result.clusterSizes.length - 10} more clusters\n`;
+          }
+        }
+        
+        message += `\n✨ Use "list-clusters" to see all clusters or "get-cluster-notes" to explore specific clusters!`;
+        
+        return createTextResponse(message);
+      } catch (error) {
+        return createTextResponse(`Clustering failed: ${(error as Error).message}`);
+      }
+    } else if (name === "list-clusters") {
+      // List all clusters with summaries
+      try {
+        const clusters = await listClusters(notesTable);
+        
+        if (clusters.length === 0) {
+          return createTextResponse("No clusters found. Run 'cluster-notes' first to create clusters.");
+        }
+        
+        let message = `📂 Found ${clusters.length} clusters:\n\n`;
+        
+        clusters.forEach((cluster, idx) => {
+          const isOutlier = cluster.cluster_id === '-1';
+          const emoji = isOutlier ? '📌' : '📁';
+          
+          message += `${emoji} ${idx + 1}. ${cluster.cluster_label} (ID: ${cluster.cluster_id})\n`;
+          message += `   📊 ${cluster.note_count} notes\n`;
+          if (cluster.cluster_summary) {
+            message += `   📝 ${cluster.cluster_summary}\n`;
+          }
+          message += '\n';
+        });
+        
+        message += `💡 Use "get-cluster-notes" with a cluster_id to see all notes in a specific cluster.`;
+        
+        return createTextResponse(message);
+      } catch (error) {
+        return createTextResponse(`Failed to list clusters: ${(error as Error).message}`);
+      }
+    } else if (name === "get-cluster-notes") {
+      // Get all notes in a specific cluster
+      const { cluster_id } = GetClusterSchema.parse(args);
+      
+      try {
+        const notes = await getNotesInCluster(notesTable, cluster_id);
+        
+        if (notes.length === 0) {
+          return createTextResponse(`No notes found in cluster "${cluster_id}". Use "list-clusters" to see available clusters.`);
+        }
+        
+        const clusterInfo = notes[0]; // All notes in cluster have same cluster info
+        
+        let message = `📁 Cluster: ${clusterInfo.cluster_label} (ID: ${cluster_id})\n`;
+        message += `📝 ${clusterInfo.cluster_summary}\n`;
+        message += `📊 ${notes.length} notes in this cluster:\n\n`;
+        
+        notes.forEach((note, idx) => {
+          message += `${idx + 1}. "${note.title}"\n`;
+          message += `   📅 Created: ${note.creation_date}\n`;
+          message += `   ✏️ Modified: ${note.modification_date}\n`;
+          message += `   📄 ${note.total_chunks} chunks\n\n`;
+        });
+        
+        message += `💡 Use "get-note" with a title to see the full content of any note.`;
+        
+        return createTextResponse(message);
+      } catch (error) {
+        return createTextResponse(`Failed to get cluster notes: ${(error as Error).message}`);
+      }
     } else if (name === "index-notes-enhanced") {
       const { processed, totalChunks, failed, timeSeconds } = await fetchAndIndexAllNotes(notesTable);
       return createTextResponse(

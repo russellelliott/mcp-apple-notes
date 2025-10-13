@@ -24,4 +24,4 @@
 # Incremental update with limit (for testing)
 # bun cli.ts --max=100
 
-bun cli.ts --max=10
+bun cli.ts --max=10 --mode=fresh
