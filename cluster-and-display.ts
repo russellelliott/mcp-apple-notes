@@ -93,10 +93,10 @@ async function main() {
     console.log("\n" + "=".repeat(60));
     console.log("📈 FINAL CLUSTERING STATISTICS:");
     console.log("=".repeat(60));
-    console.log(`   📝 Total notes processed: ${totalNotesShown}`);
-    console.log(`   🎯 Meaningful clusters: ${realClusters.length}`);
-    console.log(`   📌 Outlier notes: ${outlierCluster?.note_count || 0}`);
-    console.log(`   🏷️ Clustering success rate: ${totalNotesShown > 0 ? ((realClusters.reduce((sum, c) => sum + c.note_count, 0) / totalNotesShown) * 100).toFixed(1) : 0}%`);
+    console.log(`   📝 Total notes processed: ${clusterResult.totalNotes}`);
+    console.log(`   🎯 Meaningful clusters: ${clusterResult.totalClusters}`);
+    console.log(`   📌 Outlier notes: ${clusterResult.outliers}`);
+    console.log(`   🏷️ Clustering success rate: ${clusterResult.totalNotes > 0 ? (((clusterResult.totalNotes - clusterResult.outliers) / clusterResult.totalNotes) * 100).toFixed(1) : 0}%`);
     console.log(`   ⏱️ Total processing time: ${clusterResult.timeSeconds.toFixed(1)}s`);
     
     if (realClusters.length > 0) {
