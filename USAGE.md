@@ -41,13 +41,13 @@ bun searchNotes.ts
 - **`cli.ts`** - Main indexing script that processes Apple Notes into vector database
 - **`cluster-and-display.ts`** - Clusters notes by similarity and displays all clusters
 - **`searchNotes.ts`** - Interactive semantic search through your notes
+- **`sync-db-cache.ts`** - Synchronizes cache with database contents (run if cache gets out of sync)
 
 ### Optional Debugging/Inspection Scripts
 
 These scripts are **not required** for normal usage, but can be helpful for troubleshooting:
 
 - **`inspect-db.ts`** - Shows database contents and sample records (for debugging)
-- **`sync-db-cache.ts`** - Synchronizes cache with database and shows statistics (for troubleshooting)
 
 ### Core Library
 
@@ -58,6 +58,14 @@ These scripts are **not required** for normal usage, but can be helpful for trou
 1. **Fresh Start**: `bun cli.ts --max=100 --mode=fresh`
 2. **View Clusters**: `bun cluster-and-display.ts`
 3. **Search Notes**: `bun searchNotes.ts`
+4. **Sync Cache** (if needed): `bun sync-db-cache.ts`
+
+## When to Sync Cache
+
+Run `bun sync-db-cache.ts` if you experience:
+- Inconsistent results between indexing and clustering
+- Cache shows different note counts than database
+- After database corruption or manual database changes
 
 ## Configuration
 
