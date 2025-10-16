@@ -42,10 +42,12 @@ bun searchNotes.ts
 - **`cluster-and-display.ts`** - Clusters notes by similarity and displays all clusters
 - **`searchNotes.ts`** - Interactive semantic search through your notes
 
-### Debugging/Inspection Scripts
+### Optional Debugging/Inspection Scripts
 
-- **`inspect-db.ts`** - Shows database contents and sample records
-- **`sync-db-cache.ts`** - Synchronizes cache with database and shows statistics
+These scripts are **not required** for normal usage, but can be helpful for troubleshooting:
+
+- **`inspect-db.ts`** - Shows database contents and sample records (for debugging)
+- **`sync-db-cache.ts`** - Synchronizes cache with database and shows statistics (for troubleshooting)
 
 ### Core Library
 
