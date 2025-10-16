@@ -402,11 +402,17 @@ export const getNotesInCluster = async (notesTable: any, clusterId: string) => {
 export const listClusters = async (notesTable: any) => {
   console.log(`📊 Listing all clusters...`);
   
-  const chunks = await notesTable
+  // Get all chunks, then filter for those with cluster_id
+  const allChunks = await notesTable
     .search("")
-    .select(["cluster_id", "cluster_label", "cluster_summary", "title", "creation_date"])
-    .where("cluster_id IS NOT NULL")
+    .limit(100000)
     .toArray();
+    
+  const chunks = allChunks.filter((chunk: any) => 
+    chunk.cluster_id !== null && 
+    chunk.cluster_id !== undefined && 
+    chunk.cluster_id !== ''
+  );
   
   // Group by cluster
   const clusterMap = new Map();
@@ -430,7 +436,12 @@ export const listClusters = async (notesTable: any) => {
     cluster_label: cluster.label,
     cluster_summary: cluster.summary,
     note_count: cluster.notes.size
-  })).sort((a, b) => b.note_count - a.note_count);
+  })).sort((a, b) => {
+    // Sort by cluster_id, with -1 (outliers) last
+    if (a.cluster_id === '-1' && b.cluster_id !== '-1') return 1;
+    if (b.cluster_id === '-1' && a.cluster_id !== '-1') return -1;
+    return parseInt(a.cluster_id) - parseInt(b.cluster_id);
+  });
   
   console.log(`✅ Found ${clusters.length} clusters`);
   
