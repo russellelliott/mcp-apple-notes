@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
-import { createNotesTable } from "./index.js";
+import { createNotesTableSmart } from "./index.js";
 
 async function inspectDatabase() {
   console.log("🔍 Inspecting database contents...\n");
   
   try {
-    const { notesTable } = await createNotesTable();
+    const { notesTable } = await createNotesTableSmart(undefined, 'incremental');
     
     // Get a few chunks to see their structure
     const chunks = await notesTable.search("").limit(5).toArray();

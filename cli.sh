@@ -25,3 +25,4 @@
 # bun cli.ts --max=100
 
 bun cli.ts --max=10 --mode=fresh
+# bun full-process.ts 100 fresh

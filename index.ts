@@ -1379,6 +1379,7 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   console.log(`💡 Using batch size of ${DB_BATCH_SIZE} chunks per database write for optimal performance.`);
   
   const totalBatches = Math.ceil(allChunks.length / DB_BATCH_SIZE);
+  let totalWritten = 0;
   
   for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
     const batch = allChunks.slice(i, i + DB_BATCH_SIZE);
@@ -1386,14 +1387,39 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
     
     console.log(`💾 [${batchNum}/${totalBatches}] Writing batch of ${batch.length} chunks to database...`);
     
-    await notesTable.add(batch);
-    
-    const progress = Math.min(i + DB_BATCH_SIZE, allChunks.length);
-    console.log(`✅ [${batchNum}/${totalBatches}] Written ${progress}/${allChunks.length} chunks`);
+    try {
+      await notesTable.add(batch);
+      
+      // Verify the write by counting rows immediately after
+      const currentRowCount = await notesTable.countRows();
+      console.log(`🔍 [${batchNum}/${totalBatches}] Database now has ${currentRowCount} total rows`);
+      
+      totalWritten += batch.length;
+      const progress = Math.min(i + DB_BATCH_SIZE, allChunks.length);
+      console.log(`✅ [${batchNum}/${totalBatches}] Written ${progress}/${allChunks.length} chunks`);
+      
+    } catch (error) {
+      console.error(`❌ [${batchNum}/${totalBatches}] Failed to write batch:`, error);
+      throw error; // Re-throw to stop the process
+    }
     
     if ((i + DB_BATCH_SIZE) % 1000 === 0) {
       console.log(`🎯 Major checkpoint: ${i + DB_BATCH_SIZE}/${allChunks.length} chunks written to database`);
     }
+  }
+  
+  // Final verification
+  const finalRowCount = await notesTable.countRows();
+  console.log(`\n🔍 Final verification: Database has ${finalRowCount} rows (expected ${allChunks.length})`);
+  
+  if (finalRowCount !== allChunks.length) {
+    console.error(`❌ DATABASE WRITE VERIFICATION FAILED!`);
+    console.error(`   Expected: ${allChunks.length} chunks`);
+    console.error(`   Actual: ${finalRowCount} chunks`);
+    console.error(`   Missing: ${allChunks.length - finalRowCount} chunks`);
+    throw new Error(`Database write verification failed: ${finalRowCount}/${allChunks.length} chunks persisted`);
+  } else {
+    console.log(`✅ Database write verification successful: All ${finalRowCount} chunks persisted`);
   }
   
   // Step 6: Save updated cache

@@ -1,11 +1,14 @@
 #!/usr/bin/env bun
-import { createNotesTable, clusterNotes, listClusters, getNotesInCluster } from "./index.js";
+import { clusterNotes, listClusters, getNotesInCluster } from "./index.js";
+import * as lancedb from "@lancedb/lancedb";
 
-async function clusterAndDisplay() {
-  console.log("🎯 Clustering and displaying all notes...\n");
-  
-  try {
-    const { notesTable } = await createNotesTable();
+async function main() {
+    console.log("🎯 Clustering and displaying all notes...\n");
+    
+    try {
+        // Connect directly to the database (same method as searchNotes.ts)
+        const db = await lancedb.connect(`${process.env.HOME}/.mcp-apple-notes/data`);
+        const notesTable = await db.openTable("notes");
     
     // First, check how many notes we actually have in the database
     const allChunks = await notesTable.search("").toArray();
@@ -50,7 +53,7 @@ async function clusterAndDisplay() {
     for (const cluster of realClusters) {
       console.log(`\n🎯 Cluster ${clusterNum}: "${cluster.cluster_label}"`);
       console.log(`   📊 ${cluster.note_count} notes`);
-      console.log(`   � ${cluster.cluster_summary}`);
+      console.log(`   💭 ${cluster.cluster_summary}`);
       console.log(`   🔗 Cluster ID: ${cluster.cluster_id}`);
       
       const notesInCluster = await getNotesInCluster(notesTable, cluster.cluster_id);
@@ -70,7 +73,7 @@ async function clusterAndDisplay() {
     if (outlierCluster && outlierCluster.note_count > 0) {
       console.log(`\n📌 OUTLIER NOTES (unclustered):`);
       console.log(`   📊 ${outlierCluster.note_count} notes don't fit into any cluster`);
-      console.log(`   � ${outlierCluster.cluster_summary}`);
+      console.log(`   💭 ${outlierCluster.cluster_summary}`);
       
       const outlierNotes = await getNotesInCluster(notesTable, '-1');
       console.log(`   📖 Outlier notes (showing first 10):`);
@@ -109,23 +112,4 @@ async function clusterAndDisplay() {
   process.exit(0);
 }
 
-clusterAndDisplay();
-        // Show outlier notes if not too many
-        const notesInCluster = await getNotesInCluster(notesTable, cluster.cluster_id);
-        console.log(`   📖 Outlier notes:`);
-        notesInCluster.forEach((note, idx) => {
-          console.log(`      ${idx + 1}. "${note.title}"`);
-        });
-      }
-      
-      clusterNum++;
-    }
-    
-  } catch (error) {
-    console.error("\n❌ Error:", error);
-  }
-  
-  process.exit(0);
-}
-
-testOptimalClustering();
+main();
