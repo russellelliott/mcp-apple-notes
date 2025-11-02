@@ -9,10 +9,10 @@ async function testClusteringParams() {
     const db = await lancedb.connect(`${process.env.HOME}/.mcp-apple-notes/data`);
     const notesTable = await db.openTable("notes");
     
-    // Test different epsilon values
-    const epsilonValues = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+    // Test different epsilon values - focused on the sweet spot between 0.7 and 0.8
+    const epsilonValues = [0.70, 0.72, 0.74, 0.76, 0.78, 0.80];
     
-    console.log("Testing epsilon values (higher = more permissive, fewer outliers):\n");
+    console.log("Testing epsilon values between 0.7-0.8 (finding optimal balance):\n");
     console.log("Epsilon | Valid Clusters | Clustered Notes | Outliers | Clustering Rate");
     console.log("--------|----------------|-----------------|----------|----------------");
     

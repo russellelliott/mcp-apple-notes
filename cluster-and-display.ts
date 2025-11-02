@@ -11,7 +11,7 @@ async function main() {
         const notesTable = await db.openTable("notes");
     
     // First, check how many notes we actually have in the database
-    const allChunks = await notesTable.search("").toArray();
+    const allChunks = await notesTable.search("").limit(100000).toArray();
     const uniqueNotes = new Set(allChunks.map(chunk => `${chunk.title}|||${chunk.creation_date}`));
     
     console.log(`📊 Database contains: ${uniqueNotes.size} notes (${allChunks.length} chunks)`);
