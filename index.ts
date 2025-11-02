@@ -368,6 +368,7 @@ export const getNotesInCluster = async (notesTable: any, clusterId: string) => {
   // Fetch all chunks with this cluster_id
   const chunks = await notesTable
     .search("")
+    .limit(100000)
     .where(`cluster_id = '${clusterId}'`)
     .toArray();
   

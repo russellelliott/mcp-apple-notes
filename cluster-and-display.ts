@@ -43,7 +43,8 @@ async function main() {
     
     const clusters = await listClusters(notesTable);
     
-    let totalNotesShown = 0;
+    let clusteredNotesCount = 0;
+    let outlierNotesCount = 0;
     let clusterNum = 1;
     
     // Show real clusters first
@@ -51,13 +52,13 @@ async function main() {
     const outlierCluster = clusters.find(c => c.cluster_id === '-1');
     
     for (const cluster of realClusters) {
+      const notesInCluster = await getNotesInCluster(notesTable, cluster.cluster_id);
+      
       console.log(`\n🎯 Cluster ${clusterNum}: "${cluster.cluster_label}"`);
-      console.log(`   📊 ${cluster.note_count} notes`);
+      console.log(`   📊 ${notesInCluster.length} notes in this cluster`);
       console.log(`   💭 ${cluster.cluster_summary}`);
       console.log(`   🔗 Cluster ID: ${cluster.cluster_id}`);
-      
-      const notesInCluster = await getNotesInCluster(notesTable, cluster.cluster_id);
-      console.log(`   📖 Notes in this cluster:`);
+      console.log(`   📖 All notes in this cluster:`);
       
       notesInCluster.forEach((note, idx) => {
         console.log(`      ${idx + 1}. "${note.title}"`);
@@ -65,28 +66,25 @@ async function main() {
         console.log(`         ✏️ Modified: ${note.modification_date}`);
       });
       
-      totalNotesShown += notesInCluster.length;
+      clusteredNotesCount += notesInCluster.length;
       clusterNum++;
     }
     
     // Show outliers
     if (outlierCluster && outlierCluster.note_count > 0) {
       console.log(`\n📌 OUTLIER NOTES (unclustered):`);
-      console.log(`   📊 ${outlierCluster.note_count} notes don't fit into any cluster`);
+      console.log(`   📊 ${outlierCluster.note_count} notes in outlier group`);
       console.log(`   💭 ${outlierCluster.cluster_summary}`);
       
       const outlierNotes = await getNotesInCluster(notesTable, '-1');
-      console.log(`   📖 Outlier notes (showing first 10):`);
+      outlierNotesCount = outlierNotes.length;
+      console.log(`   📖 All ${outlierNotes.length} outlier notes:`);
       
-      outlierNotes.slice(0, 10).forEach((note, idx) => {
+      outlierNotes.forEach((note, idx) => {
         console.log(`      ${idx + 1}. "${note.title}"`);
+        console.log(`         📅 Created: ${note.creation_date}`);
+        console.log(`         ✏️ Modified: ${note.modification_date}`);
       });
-      
-      if (outlierNotes.length > 10) {
-        console.log(`      ... and ${outlierNotes.length - 10} more outlier notes`);
-      }
-      
-      totalNotesShown += outlierNotes.length;
     }
     
     // Final summary
@@ -95,8 +93,10 @@ async function main() {
     console.log("=".repeat(60));
     console.log(`   📝 Total notes processed: ${clusterResult.totalNotes}`);
     console.log(`   🎯 Meaningful clusters: ${clusterResult.totalClusters}`);
-    console.log(`   📌 Outlier notes: ${clusterResult.outliers}`);
-    console.log(`   🏷️ Clustering success rate: ${clusterResult.totalNotes > 0 ? (((clusterResult.totalNotes - clusterResult.outliers) / clusterResult.totalNotes) * 100).toFixed(1) : 0}%`);
+    console.log(`   📊 Notes actually clustered: ${clusteredNotesCount} notes`);
+    console.log(`   📌 Outlier notes: ${outlierNotesCount}`);
+    const actualClusteredRate = clusterResult.totalNotes > 0 ? ((clusteredNotesCount / clusterResult.totalNotes) * 100).toFixed(1) : 0;
+    console.log(`   🏷️ Actual clustering success rate: ${actualClusteredRate}%`);
     console.log(`   ⏱️ Total processing time: ${clusterResult.timeSeconds.toFixed(1)}s`);
     
     if (realClusters.length > 0) {
