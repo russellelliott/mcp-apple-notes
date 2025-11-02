@@ -25,12 +25,12 @@ async function main() {
     // Run clustering with optimal parameters we found earlier
     console.log("🔬 Running DBSCAN clustering with optimal parameters...");
     console.log("   • min_cluster_size = 2");
-    console.log("   • epsilon = 0.6 (captures most similar notes)");
+    console.log("   • epsilon = 0.7 (optimal for balance between specificity and grouping)");
     
     const clusterResult = await clusterNotes(
       notesTable, 
       2,   // min_cluster_size = 2 
-      0.6  // epsilon = 0.6 (optimal value we found)
+      0.7  // epsilon = 0.7 (optimal value - 50% clustering rate)
     );
     
     console.log(`\n✅ Clustering complete: ${clusterResult.totalClusters} clusters, ${clusterResult.outliers} outliers`);

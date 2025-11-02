@@ -243,10 +243,11 @@ const runDBSCAN = (vectors: number[][], minClusterSize = 10, epsilon = 0.3) => {
 export const clusterNotes = async (
   notesTable: any,
   minClusterSize = 10,
-  epsilon = 0.3
+  epsilon = 0.3,
+  verbose = true
 ) => {
   const start = performance.now();
-  console.log(`🔬 Starting note clustering...`);
+  if (verbose) console.log(`🔬 Starting note clustering...`);
   
   // Step 1: Aggregate chunks to note-level embeddings
   const noteEmbeddings = await aggregateChunksToNotes(notesTable);
@@ -309,7 +310,7 @@ export const clusterNotes = async (
   }
   
   // Step 6: Update ALL chunks with cluster information
-  console.log(`💾 Updating database with cluster assignments...`);
+  if (verbose) console.log(`💾 Updating database with cluster assignments...`);
   
   for (const [clusterId, notes] of clusters.entries()) {
     const clusterInfo = clusterSummaries.get(clusterId)!;
@@ -328,9 +329,9 @@ export const clusterNotes = async (
           }
         });
         
-        console.log(`   ✅ Updated "${note.title}" → Cluster ${clusterId} (${clusterInfo.label})`);
+        if (verbose) console.log(`   ✅ Updated "${note.title}" → Cluster ${clusterId} (${clusterInfo.label})`);
       } catch (error) {
-        console.log(`   ⚠️ Failed to update "${note.title}": ${(error as Error).message}`);
+        if (verbose) console.log(`   ⚠️ Failed to update "${note.title}": ${(error as Error).message}`);
       }
     }
   }
