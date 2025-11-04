@@ -2,9 +2,13 @@
 import { clusterNotes, listClusters, getNotesInCluster, aggregateChunksToNotes } from "./index.js";
 import * as lancedb from "@lancedb/lancedb";
 
+// ===== CONFIGURATION =====
+const HDBSCAN_MIN_CLUSTER_SIZE = 2;
+const MIN_SECONDARY_CLUSTER_SIZE = 3;
+
 /**
  * Two-pass clustering with intelligent outlier assignment:
- * Pass 1: HDBSCAN with min_cluster_size=5 for hierarchical density-based clusters
+ * Pass 1: HDBSCAN with min_cluster_size=2 for hierarchical density-based clusters
  * Pass 2: Create secondary clusters from remaining outliers using K-means or Topic Modeling
  * 
  * Enhanced approach:
@@ -147,10 +151,10 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
     
     // ===== PASS 1: HDBSCAN =====
     console.log("════════════════════════════════════════");
-    console.log("PASS 1: HDBSCAN Clustering (min_cluster_size=5)");
+    console.log(`PASS 1: HDBSCAN Clustering (min_cluster_size=${HDBSCAN_MIN_CLUSTER_SIZE})`);
     console.log("════════════════════════════════════════\n");
     
-    const dbscanResult = await clusterNotes(notesTable, 5, false);
+    const dbscanResult = await clusterNotes(notesTable, HDBSCAN_MIN_CLUSTER_SIZE, false);
     
     console.log(`✅ HDBSCAN Results:`);
     console.log(`   • Clusters: ${dbscanResult.totalClusters}`);
@@ -216,8 +220,7 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
           secondaryClusterGroups.get(clusterLabel)!.push(note);
         });
         
-        // Step 3: Filter clusters by minimum size (require at least 3 notes to form a secondary cluster)
-        const MIN_SECONDARY_CLUSTER_SIZE = 3;
+        // Step 3: Filter clusters by minimum size (require at least MIN_SECONDARY_CLUSTER_SIZE notes to form a secondary cluster)
         const secondaryClustersToCreate = new Map<number, typeof outlierNotes>();
         const remainingOutliers: typeof outlierNotes = [];
         

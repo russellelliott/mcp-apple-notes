@@ -212,7 +212,7 @@ export const aggregateChunksToNotes = async (notesTable: any) => {
 
 // HDBSCAN clustering - hierarchical density-based clustering
 // No epsilon parameter needed; automatically adapts to varying density clusters
-const runHDBSCAN = (vectors: number[][], minClusterSize = 5) => {
+const runHDBSCAN = (vectors: number[][], minClusterSize = 2) => {
   console.log(`🔬 Running HDBSCAN clustering (min_cluster_size=${minClusterSize})...`);
   
   const hdbscan = new HDBSCAN({ minClusterSize });
@@ -231,7 +231,7 @@ const runHDBSCAN = (vectors: number[][], minClusterSize = 5) => {
 // Main clustering function
 export const clusterNotes = async (
   notesTable: any,
-  minClusterSize = 5,
+  minClusterSize = 2,
   verbose = true
 ) => {
   const start = performance.now();
@@ -765,7 +765,7 @@ const IndexNotesSchema = z.object({
 });
 
 const ClusterNotesSchema = z.object({
-  min_cluster_size: z.number().optional().default(5),
+  min_cluster_size: z.number().optional().default(2),
 });
 
 const GetClusterSchema = z.object({
