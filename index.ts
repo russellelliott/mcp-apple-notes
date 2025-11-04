@@ -19,9 +19,9 @@ import {
 import { type Float, Float32, Utf8 } from "apache-arrow";
 import { pipeline } from "@huggingface/transformers";
 
-// Install with: bun add density-clustering
-// For density-based clustering (using DBSCAN since HDBSCAN is not available)
-import { DBSCAN } from "density-clustering";
+// Install with: bun add hdbscan-ts
+// Hierarchical density-based clustering
+import { HDBSCAN } from "hdbscan-ts";
 
 // Remove the turndown instance
 const db = await lancedb.connect(
@@ -210,40 +210,28 @@ export const aggregateChunksToNotes = async (notesTable: any) => {
   return noteEmbeddings;
 };
 
-// DBSCAN clustering using density-clustering library
-// Note: DBSCAN is similar to HDBSCAN but uses fixed epsilon distance
-const runDBSCAN = (vectors: number[][], minClusterSize = 10, epsilon = 0.3) => {
-  console.log(`🔬 Running DBSCAN clustering (epsilon=${epsilon}, min_samples=${minClusterSize})...`);
+// HDBSCAN clustering - hierarchical density-based clustering
+// No epsilon parameter needed; automatically adapts to varying density clusters
+const runHDBSCAN = (vectors: number[][], minClusterSize = 5) => {
+  console.log(`🔬 Running HDBSCAN clustering (min_cluster_size=${minClusterSize})...`);
   
-  const dbscan = new DBSCAN();
+  const hdbscan = new HDBSCAN({ minClusterSize });
   
-  // Run DBSCAN clustering
-  // DBSCAN parameters: dataset, epsilon (neighborhood distance), minPts (minimum points)
-  const clusters = dbscan.run(vectors, epsilon, minClusterSize);
+  // Run HDBSCAN clustering
+  // Returns labels directly where -1 = noise/outlier
+  const labels = hdbscan.fit(vectors);
   
-  // DBSCAN returns arrays of point indices for each cluster, need to convert to labels
-  const labels = new Array(vectors.length).fill(-1); // -1 = noise/outlier
-  
-  clusters.forEach((cluster, clusterId) => {
-    if (Array.isArray(cluster)) {
-      cluster.forEach((pointIndex) => {
-        labels[pointIndex] = clusterId;
-      });
-    }
-  });
-  
-  const totalClusters = clusters.length;
+  const totalClusters = Math.max(...labels) + 1;
   const outliers = labels.filter((l) => l === -1).length;
   
-  console.log(`✅ DBSCAN found ${totalClusters} clusters, ${outliers} outliers`);
+  console.log(`✅ HDBSCAN found ${totalClusters} clusters, ${outliers} outliers`);
   return labels;
 };
 
 // Main clustering function
 export const clusterNotes = async (
   notesTable: any,
-  minClusterSize = 10,
-  epsilon = 0.3,
+  minClusterSize = 5,
   verbose = true
 ) => {
   const start = performance.now();
@@ -257,10 +245,10 @@ export const clusterNotes = async (
   }
   
   // Step 2: Extract vectors for clustering
-  const vectors = noteEmbeddings.map(n => n.embedding);
+  const vectors = noteEmbeddings.map((n) => n.embedding);
   
   // Step 3: Run clustering
-  const clusterLabels = runDBSCAN(vectors, minClusterSize, epsilon);
+  const clusterLabels = runHDBSCAN(vectors, minClusterSize);
   
   // Step 4: Group notes by cluster
   const clusters = new Map();
@@ -777,8 +765,7 @@ const IndexNotesSchema = z.object({
 });
 
 const ClusterNotesSchema = z.object({
-  min_cluster_size: z.number().optional().default(10),
-  epsilon: z.number().optional().default(0.3),
+  min_cluster_size: z.number().optional().default(5),
 });
 
 const GetClusterSchema = z.object({
@@ -1588,17 +1575,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
       
       return createTextResponse(message);
     } else if (name === "cluster-notes") {
-      // Run DBSCAN clustering on all notes
-      const { min_cluster_size, epsilon } = ClusterNotesSchema.parse(args);
+      // Run HDBSCAN clustering on all notes
+      const { min_cluster_size } = ClusterNotesSchema.parse(args);
       
       try {
-        const result = await clusterNotes(notesTable, min_cluster_size, epsilon);
+        const result = await clusterNotes(notesTable, min_cluster_size);
         
         let message = `Successfully clustered ${result.totalNotes} notes in ${result.timeSeconds.toFixed(1)}s!\n\n`;
         message += `📊 Clustering Results:\n`;
         message += `• Total clusters: ${result.totalClusters}\n`;
         message += `• Uncategorized notes: ${result.outliers}\n`;
-        message += `• Parameters: min_cluster_size=${min_cluster_size}, epsilon=${epsilon}\n\n`;
+        message += `• Algorithm: HDBSCAN (hierarchical density-based)\n`;
+        message += `• Parameters: min_cluster_size=${min_cluster_size}\n\n`;
         
         if (result.clusterSizes.length > 0) {
           message += `🏷️ Top clusters by size:\n`;

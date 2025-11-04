@@ -4,12 +4,12 @@ import * as lancedb from "@lancedb/lancedb";
 
 /**
  * Two-pass clustering with intelligent outlier assignment:
- * Pass 1: DBSCAN with epsilon=0.7 for dense, high-confidence clusters
- * Pass 2: Assign remaining outliers to nearest DBSCAN clusters using embeddings
+ * Pass 1: HDBSCAN with min_cluster_size=5 for hierarchical density-based clusters
+ * Pass 2: Create secondary clusters from remaining outliers using K-means or Topic Modeling
  * 
  * Enhanced approach:
  * - Uses K-means or Topic Modeling to understand outlier structure
- * - Reassigns outliers to their most similar DBSCAN clusters
+ * - Creates secondary clusters only from outliers that form coherent groups
  * - Persists new assignments to database
  * - Unified display shows final cluster composition
  * 
@@ -133,7 +133,7 @@ const euclideanDistance = (a: number[], b: number[]): number => {
 
 async function twoPassClustering(useTopicModeling: boolean = false) {
   console.log("🎯 Two-Pass Intelligent Clustering\n");
-  console.log("Pass 1: DBSCAN (high-confidence dense clusters)");
+  console.log("Pass 1: HDBSCAN (hierarchical density-based clusters)");
   console.log(`Pass 2: ${useTopicModeling ? 'Topic Modeling' : 'K-means'} + Secondary Clustering (create new clusters from coherent outlier groups)\n`);
   
   try {
@@ -145,14 +145,14 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
     
     console.log(`📊 Database: ${uniqueNotes.size} notes (${allChunks.length} chunks)\n`);
     
-    // ===== PASS 1: DBSCAN =====
+    // ===== PASS 1: HDBSCAN =====
     console.log("════════════════════════════════════════");
-    console.log("PASS 1: DBSCAN Clustering (epsilon=0.7)");
+    console.log("PASS 1: HDBSCAN Clustering (min_cluster_size=5)");
     console.log("════════════════════════════════════════\n");
     
-    const dbscanResult = await clusterNotes(notesTable, 2, 0.7, false);
+    const dbscanResult = await clusterNotes(notesTable, 5, false);
     
-    console.log(`✅ DBSCAN Results:`);
+    console.log(`✅ HDBSCAN Results:`);
     console.log(`   • Clusters: ${dbscanResult.totalClusters}`);
     console.log(`   • Clustered notes: ${dbscanResult.totalNotes - dbscanResult.outliers}`);
     console.log(`   • Outliers: ${dbscanResult.outliers}`);
@@ -319,7 +319,7 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
     console.log("════════════════════════════════════════\n");
     
     console.log(`Total notes: ${dbscanResult.totalNotes}`);
-    console.log(`Primary DBSCAN clusters: ${dbscanResult.totalClusters}`);
+    console.log(`Primary HDBSCAN clusters: ${dbscanResult.totalClusters}`);
     console.log(`Secondary clusters created: ${secondaryClusterCount}`);
     console.log(`Total clusters: ${finalRealClusters.length}`);
     console.log(`Notes in clusters: ${totalClustered} (${((totalClustered / dbscanResult.totalNotes) * 100).toFixed(1)}%)`);
