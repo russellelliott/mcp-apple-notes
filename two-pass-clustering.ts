@@ -5,22 +5,96 @@ import * as lancedb from "@lancedb/lancedb";
 // ===== CONFIGURATION =====
 const HDBSCAN_MIN_CLUSTER_SIZE = 2;
 const MIN_SECONDARY_CLUSTER_SIZE = 3;
+const KMEANS_MAX_K = 20; // Maximum k to test in elbow method
+const KMEANS_MIN_K = 2;
 
 /**
  * Two-pass clustering with intelligent outlier assignment:
  * Pass 1: HDBSCAN with min_cluster_size=2 for hierarchical density-based clusters
- * Pass 2: Create secondary clusters from remaining outliers using K-means or Topic Modeling
+ * Pass 2: K-means with automatic k selection (Elbow Method)
  * 
  * Enhanced approach:
- * - Uses K-means or Topic Modeling to understand outlier structure
- * - Creates secondary clusters only from outliers that form coherent groups
+ * - Pass 1: Uses HDBSCAN for high-confidence dense clusters
+ * - Pass 2: Uses K-means with elbow method to find optimal number of clusters
+ * - Only creates secondary clusters if they meet minimum size threshold
  * - Persists new assignments to database
  * - Unified display shows final cluster composition
  * 
  * Usage:
- *   bun two-pass-clustering.ts          # Uses K-means for outlier analysis
- *   bun two-pass-clustering.ts --topic-modeling  # Uses Topic Modeling for outlier analysis
+ *   bun two-pass-clustering.ts          # Uses K-means with elbow method for Pass 2
+ *   bun two-pass-clustering.ts --topic-modeling  # Uses Topic Modeling for outlier analysis instead
  */
+
+// ===== K-MEANS WITH ELBOW METHOD =====
+const kMeansWithElbow = (vectors: number[][]): { labels: number[]; k: number } => {
+  if (vectors.length === 0) return { labels: [], k: 0 };
+  if (vectors.length === 1) return { labels: [0], k: 1 };
+  
+  // Calculate inertia for different k values
+  const inertias: Array<{ k: number; inertia: number }> = [];
+  const maxK = Math.min(KMEANS_MAX_K, vectors.length);
+  
+  for (let k = KMEANS_MIN_K; k <= maxK; k++) {
+    const kmResult = kMeans(vectors, k, 50);
+    
+    // Calculate inertia (sum of squared distances to cluster centers)
+    const centroids: number[][] = [];
+    for (let i = 0; i < k; i++) {
+      const clusterPoints = vectors.filter((_, idx) => kmResult.labels[idx] === i);
+      if (clusterPoints.length > 0) {
+        const dims = vectors[0].length;
+        const centroid = new Array(dims);
+        for (let d = 0; d < dims; d++) {
+          centroid[d] = clusterPoints.reduce((sum, p) => sum + p[d], 0) / clusterPoints.length;
+        }
+        centroids[i] = centroid;
+      }
+    }
+    
+    let inertia = 0;
+    for (let i = 0; i < vectors.length; i++) {
+      const clusterId = kmResult.labels[i];
+      if (centroids[clusterId]) {
+        const dist = euclideanDistance(vectors[i], centroids[clusterId]);
+        inertia += dist * dist;
+      }
+    }
+    
+    inertias.push({ k, inertia });
+  }
+  
+  // Find elbow point using the "knee" detection algorithm
+  // Calculate the angle at each point and find the sharpest change
+  let bestK = KMEANS_MIN_K;
+  let maxAngleChange = 0;
+  
+  for (let i = 1; i < inertias.length - 1; i++) {
+    const prev = inertias[i - 1];
+    const curr = inertias[i];
+    const next = inertias[i + 1];
+    
+    // Vector from prev to curr
+    const v1 = { x: curr.k - prev.k, y: curr.inertia - prev.inertia };
+    // Vector from curr to next
+    const v2 = { x: next.k - curr.k, y: next.inertia - curr.inertia };
+    
+    // Calculate angle change (simplified: check drop rate)
+    const drop1 = prev.inertia - curr.inertia;
+    const drop2 = curr.inertia - next.inertia;
+    const angleChange = Math.abs(drop1 - drop2);
+    
+    if (angleChange > maxAngleChange) {
+      maxAngleChange = angleChange;
+      bestK = curr.k;
+    }
+  }
+  
+  console.log(`   📊 Elbow method tested k=${KMEANS_MIN_K} to ${maxK}`);
+  console.log(`   📊 Optimal k found: ${bestK} (inertia drop flattens here)\n`);
+  
+  // Run k-means with optimal k
+  return { ...kMeans(vectors, bestK, 100), k: bestK };
+};
 
 // ===== K-MEANS IMPLEMENTATION =====
 const kMeans = (vectors: number[][], k: number, maxIterations: number = 100) => {
@@ -29,6 +103,8 @@ const kMeans = (vectors: number[][], k: number, maxIterations: number = 100) => 
   
   const centroids: number[][] = [];
   const indices = new Set<number>();
+  
+  // Random initialization
   while (centroids.length < k) {
     const idx = Math.floor(Math.random() * vectors.length);
     if (!indices.has(idx)) {
@@ -40,6 +116,7 @@ const kMeans = (vectors: number[][], k: number, maxIterations: number = 100) => 
   let labels = new Array(vectors.length).fill(0);
   
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    // Assign points to nearest centroid
     const newLabels = vectors.map((vec) => {
       let minDist = Infinity;
       let bestCluster = 0;
@@ -55,6 +132,7 @@ const kMeans = (vectors: number[][], k: number, maxIterations: number = 100) => 
       return bestCluster;
     });
     
+    // Check for convergence
     if (JSON.stringify(newLabels) === JSON.stringify(labels)) {
       labels = newLabels;
       break;
@@ -62,13 +140,13 @@ const kMeans = (vectors: number[][], k: number, maxIterations: number = 100) => 
     
     labels = newLabels;
     
+    // Update centroids
     for (let i = 0; i < k; i++) {
       const clusterPoints = vectors.filter((_, idx) => labels[idx] === i);
       if (clusterPoints.length > 0) {
         const dims = vectors[0].length;
         for (let d = 0; d < dims; d++) {
-          centroids[i][d] =
-            clusterPoints.reduce((sum, p) => sum + p[d], 0) / clusterPoints.length;
+          centroids[i][d] = clusterPoints.reduce((sum, p) => sum + p[d], 0) / clusterPoints.length;
         }
       }
     }
@@ -138,7 +216,7 @@ const euclideanDistance = (a: number[], b: number[]): number => {
 async function twoPassClustering(useTopicModeling: boolean = false) {
   console.log("🎯 Two-Pass Intelligent Clustering\n");
   console.log("Pass 1: HDBSCAN (hierarchical density-based clusters)");
-  console.log(`Pass 2: ${useTopicModeling ? 'Topic Modeling' : 'K-means'} + Secondary Clustering (create new clusters from coherent outlier groups)\n`);
+  console.log(`Pass 2: ${useTopicModeling ? 'Topic Modeling' : 'K-means with Elbow Method (auto-determines optimal k)'} + Secondary Clustering\n`);
   
   try {
     const db = await lancedb.connect(`${process.env.HOME}/.mcp-apple-notes/data`);
@@ -197,14 +275,10 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
             ))
             .map(n => n.embedding);
           
-          const suggestedK = Math.ceil(Math.sqrt(outlierNotes.length));
-          const maxK = Math.min(10, outlierNotes.length);
-          const k = Math.max(2, Math.min(suggestedK, maxK));
-          
-          console.log(`🎯 Running K-means with k=${k}...\n`);
-          const kmResult = kMeans(outlierVectors, k);
-          secondaryLabels = kmResult.labels;
-          algorithmUsed = 'K-means';
+          console.log(`🎯 Running K-means with Elbow Method (auto-determining optimal k)...\n`);
+          const kmeansResult = kMeansWithElbow(outlierVectors);
+          secondaryLabels = kmeansResult.labels;
+          algorithmUsed = `K-means (k=${kmeansResult.k})`;
         }
         
         const timeAnalysis = (performance.now() - startPass2) / 1000;
