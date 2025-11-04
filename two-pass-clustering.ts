@@ -134,7 +134,7 @@ const euclideanDistance = (a: number[], b: number[]): number => {
 async function twoPassClustering(useTopicModeling: boolean = false) {
   console.log("🎯 Two-Pass Intelligent Clustering\n");
   console.log("Pass 1: DBSCAN (high-confidence dense clusters)");
-  console.log(`Pass 2: ${useTopicModeling ? 'Topic Modeling' : 'K-means'} + Reassignment (assign outliers to nearest clusters)\n`);
+  console.log(`Pass 2: ${useTopicModeling ? 'Topic Modeling' : 'K-means'} + Secondary Clustering (create new clusters from coherent outlier groups)\n`);
   
   try {
     const db = await lancedb.connect(`${process.env.HOME}/.mcp-apple-notes/data`);
@@ -158,13 +158,15 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
     console.log(`   • Outliers: ${dbscanResult.outliers}`);
     console.log(`   • Time: ${dbscanResult.timeSeconds.toFixed(1)}s\n`);
     
-    // ===== PASS 2: ANALYZE OUTLIERS AND REASSIGN =====
-    let reassignmentCount = 0;
+    // ===== PASS 2: CREATE SECONDARY CLUSTERS FROM OUTLIERS =====
+    let secondaryClusterCount = 0;
+    let secondaryClusterNotes = 0;
+    let finalOutlierCount = 0;
     let algorithmUsed = '';
     
     if (dbscanResult.outliers > 0) {
       console.log("════════════════════════════════════════");
-      console.log("PASS 2: Outlier Analysis & Reassignment");
+      console.log("PASS 2: Secondary Cluster Creation");
       console.log("════════════════════════════════════════\n");
       
       const outlierNotes = await getNotesInCluster(notesTable, '-1');
@@ -204,104 +206,85 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
         const timeAnalysis = (performance.now() - startPass2) / 1000;
         console.log(`✅ Outlier structure analyzed in ${timeAnalysis.toFixed(1)}s\n`);
         
-        // Step 2: Calculate DBSCAN cluster centroids
-        console.log("📍 Computing DBSCAN cluster centroids...\n");
-        const dbscanClusters = await listClusters(notesTable);
-        const realClusters = dbscanClusters.filter(c => c.cluster_id !== '-1');
+        // Step 2: Group outliers by their secondary cluster labels
+        const secondaryClusterGroups = new Map<number, typeof outlierNotes>();
+        outlierNotes.forEach((note, idx) => {
+          const clusterLabel = secondaryLabels[idx];
+          if (!secondaryClusterGroups.has(clusterLabel)) {
+            secondaryClusterGroups.set(clusterLabel, []);
+          }
+          secondaryClusterGroups.get(clusterLabel)!.push(note);
+        });
         
-        const clusterCentroids = new Map<string, number[]>();
-        const noteEmbeddings = await aggregateChunksToNotes(notesTable);
+        // Step 3: Filter clusters by minimum size (require at least 3 notes to form a secondary cluster)
+        const MIN_SECONDARY_CLUSTER_SIZE = 3;
+        const secondaryClustersToCreate = new Map<number, typeof outlierNotes>();
+        const remainingOutliers: typeof outlierNotes = [];
         
-        for (const cluster of realClusters) {
-          const notesInCluster = await getNotesInCluster(notesTable, cluster.cluster_id);
+        for (const [clusterId, notes] of secondaryClusterGroups) {
+          if (notes.length >= MIN_SECONDARY_CLUSTER_SIZE) {
+            secondaryClustersToCreate.set(clusterId, notes);
+            secondaryClusterNotes += notes.length;
+          } else {
+            remainingOutliers.push(...notes);
+          }
+        }
+        
+        console.log(`📊 Secondary Cluster Analysis:`);
+        console.log(`   • Potential clusters from ${algorithmUsed}: ${secondaryClusterGroups.size}`);
+        console.log(`   • Clusters meeting min size (${MIN_SECONDARY_CLUSTER_SIZE}+): ${secondaryClustersToCreate.size}`);
+        console.log(`   • Notes in secondary clusters: ${secondaryClusterNotes}`);
+        console.log(`   • Notes remaining as outliers: ${remainingOutliers.length}\n`);
+        
+        // Step 4: Persist secondary clusters to database with new cluster IDs
+        if (secondaryClustersToCreate.size > 0) {
+          console.log("💾 Persisting secondary clusters to database...\n");
           
-          const clusterVectors = noteEmbeddings
-            .filter(note => notesInCluster.some(n =>
-              n.title === note.title && n.creation_date === note.creation_date
-            ))
-            .map(n => n.embedding);
+          // Get the max existing cluster ID to start secondary cluster numbering
+          const existingClusters = await listClusters(notesTable);
+          const maxClusterId = Math.max(...existingClusters
+            .filter(c => c.cluster_id !== '-1')
+            .map(c => parseInt(c.cluster_id) || 0));
           
-          if (clusterVectors.length > 0) {
-            const dims = clusterVectors[0].length;
-            const centroid = new Array(dims).fill(0);
-            for (let d = 0; d < dims; d++) {
-              centroid[d] = clusterVectors.reduce((sum, vec) => sum + vec[d], 0) / clusterVectors.length;
+          let clusterIdCounter = maxClusterId + 1;
+          
+          for (const [_, notes] of secondaryClustersToCreate) {
+            const newClusterId = clusterIdCounter.toString();
+            
+            for (const note of notes) {
+              try {
+                await notesTable.update({
+                  where: `title = '${note.title.replace(/'/g, "''")}' AND creation_date = '${note.creation_date}'`,
+                  values: {
+                    cluster_id: newClusterId
+                  }
+                });
+              } catch (error) {
+                // Continue on error
+              }
             }
-            clusterCentroids.set(cluster.cluster_id, centroid);
-          }
-        }
-        
-        // Step 3: Assign each outlier to nearest DBSCAN cluster
-        console.log("🔄 Assigning outliers to nearest DBSCAN clusters...\n");
-        
-        const outlierAssignments = new Map<string, typeof outlierNotes>();
-        
-        for (let i = 0; i < outlierNotes.length; i++) {
-          const note = outlierNotes[i];
-          const embedding = noteEmbeddings.find(n =>
-            n.title === note.title && n.creation_date === note.creation_date
-          )?.embedding;
-          
-          if (!embedding) continue;
-          
-          let nearestClusterId = realClusters[0]?.cluster_id || '0';
-          let minDistance = Infinity;
-          
-          for (const [clusterId, centroid] of clusterCentroids) {
-            const distance = euclideanDistance(embedding, centroid);
-            if (distance < minDistance) {
-              minDistance = distance;
-              nearestClusterId = clusterId;
-            }
+            
+            secondaryClusterCount++;
+            clusterIdCounter++;
           }
           
-          if (!outlierAssignments.has(nearestClusterId)) {
-            outlierAssignments.set(nearestClusterId, []);
-          }
-          outlierAssignments.get(nearestClusterId)!.push(note);
+          console.log(`✅ Created ${secondaryClusterCount} secondary clusters\n`);
         }
         
-        // Step 4: Persist reassignments to database
-        // Use the exact same update method as DBSCAN clustering in index.ts
-        console.log("💾 Persisting cluster reassignments to database...\n");
-        
-        for (const [targetClusterId, notes] of outlierAssignments) {
-          for (const note of notes) {
-            try {
-              // Update all chunks belonging to this note using the exact same pattern as DBSCAN
-              await notesTable.update({
-                where: `title = '${note.title.replace(/'/g, "''")}' AND creation_date = '${note.creation_date}'`,
-                values: {
-                  cluster_id: String(targetClusterId)
-                }
-              });
-              reassignmentCount++;
-            } catch (error) {
-              // Continue on error
-            }
-          }
-        }
-        
-        console.log(`✅ Successfully reassigned ${reassignmentCount} outlier notes\n`);
-        console.log("📊 Reassignment Summary:");
-        for (const [clusterId, notes] of outlierAssignments) {
-          const clusterInfo = realClusters.find(c => c.cluster_id === String(clusterId));
-          console.log(`   • Cluster "${clusterInfo?.cluster_label}": +${notes.length} notes reassigned`);
-        }
-        console.log();
+        finalOutlierCount = remainingOutliers.length;
       }
     }
     
     // ===== UNIFIED DISPLAY =====
     console.log("════════════════════════════════════════");
-    console.log("📊 UNIFIED CLUSTER DISPLAY (After Reassignment)");
+    console.log("📊 UNIFIED CLUSTER DISPLAY");
     console.log("════════════════════════════════════════\n");
     
     const finalClusters = await listClusters(notesTable);
     const finalRealClusters = finalClusters.filter(c => c.cluster_id !== '-1');
     const finalOutlierCluster = finalClusters.find(c => c.cluster_id === '-1');
     
-    console.log("🎯 FINAL CLUSTERS:\n");
+    console.log("🎯 ALL CLUSTERS:\n");
     let totalClustered = 0;
     
     for (let i = 0; i < finalRealClusters.length; i++) {
@@ -309,12 +292,26 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
       const notesInCluster = await getNotesInCluster(notesTable, cluster.cluster_id);
       totalClustered += notesInCluster.length;
       
-      console.log(`  📌 Cluster ${i + 1}: "${cluster.cluster_label}"`);
-      console.log(`     📊 ${notesInCluster.length} notes (updated from: ${cluster.note_count})`);
-      console.log(`     💭 ${cluster.cluster_summary}\n`);
+      console.log(`📌 Cluster ${i + 1}: "${cluster.cluster_label}"`);
+      console.log(`   📊 ${notesInCluster.length} notes`);
+      console.log(`   💭 ${cluster.cluster_summary}`);
+      console.log(`   📖 Notes:`);
+      notesInCluster.forEach((note, idx) => {
+        console.log(`      ${idx + 1}. "${note.title}"`);
+      });
+      console.log();
     }
     
-    const remainingOutliers = finalOutlierCluster?.note_count || 0;
+    // Display remaining outliers
+    const outlierCluster = await getNotesInCluster(notesTable, '-1');
+    if (outlierCluster.length > 0) {
+      console.log(`📌 OUTLIERS (${outlierCluster.length} notes):`);
+      console.log(`   Notes that don't fit into any cluster:`);
+      outlierCluster.forEach((note, idx) => {
+        console.log(`      ${idx + 1}. "${note.title}"`);
+      });
+      console.log();
+    }
     
     // ===== FINAL SUMMARY =====
     console.log("════════════════════════════════════════");
@@ -322,19 +319,21 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
     console.log("════════════════════════════════════════\n");
     
     console.log(`Total notes: ${dbscanResult.totalNotes}`);
-    console.log(`Clusters: ${finalRealClusters.length}`);
+    console.log(`Primary DBSCAN clusters: ${dbscanResult.totalClusters}`);
+    console.log(`Secondary clusters created: ${secondaryClusterCount}`);
+    console.log(`Total clusters: ${finalRealClusters.length}`);
     console.log(`Notes in clusters: ${totalClustered} (${((totalClustered / dbscanResult.totalNotes) * 100).toFixed(1)}%)`);
-    console.log(`Remaining outliers: ${remainingOutliers}`);
+    console.log(`Remaining outliers: ${outlierCluster.length}`);
     
     console.log(`\n✨ Two-pass clustering complete!`);
     console.log(`   🔄 Analysis method: ${algorithmUsed || 'None'}`);
-    console.log(`   📊 Outliers reassigned: ${reassignmentCount}`);
+    console.log(`   📊 Secondary clusters created: ${secondaryClusterCount}`);
     console.log(`   💾 All changes persisted to database`);
     
-    if (remainingOutliers === 0) {
+    if (outlierCluster.length === 0) {
       console.log("\n🎉 SUCCESS: All notes are now clustered!");
     } else {
-      console.log(`\n💡 Note: ${remainingOutliers} notes remain as outliers (too different from existing clusters)`);
+      console.log(`\n💡 Note: ${outlierCluster.length} notes remain as true outliers (too isolated to form clusters)`);
     }
     
   } catch (error) {
