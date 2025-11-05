@@ -517,80 +517,53 @@ export const listClusters = async (notesTable: any) => {
   return clusters;
 };
 
-// Exported helper: generate cluster label & keywords from an array of notes
+// Exported helper: generate cluster label from top 2 most common words in note titles
 export const generateClusterLabel = (notes: any[]): { label: string; keywords: string } => {
   if (!notes || notes.length === 0) return { label: 'Empty', keywords: '' };
 
   try {
-    // URL/metadata filtering regex
-    const urlRegex = /https?:\/\/\S+|www\.\S+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    // Combine all titles
+    const allTitles = notes.map((n: any) => n.title || '').join(' ');
+    
+    // Clean: lowercase, remove non-word chars, split
+    const words = allTitles
+      .toLowerCase()
+      .replace(/[^\w\s]/g, '')
+      .split(/\s+/)
+      .filter((word: string) => word.length > 3);
 
-    // Clean and tokenize documents
-    const documents: string[][] = [];
-    const allWords = new Set<string>();
-
-    notes.forEach((note: any) => {
-      let cleanText = `${note.title} ${note.content || ''}`;
-      cleanText = cleanText
-        .replace(urlRegex, '')
-        .replace(/#+\s/g, '')
-        .replace(/[\[\](){}*_\-`]/g, ' ')
-        .toLowerCase()
-        .replace(/[^\w\s]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      const tokens = cleanText.split(/\s+/).filter(w => w.length > 2);
-      documents.push(tokens);
-      tokens.forEach(w => allWords.add(w));
+    // Count occurrences
+    const wordFreq: Record<string, number> = {};
+    words.forEach((word: string) => {
+      wordFreq[word] = (wordFreq[word] || 0) + 1;
     });
 
-    const stopWords = new Set([
-      'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
-      'is', 'are', 'was', 'were', 'that', 'this', 'be', 'as', 'by', 'from', 'have', 'it',
-      'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
-      'can', 'must', 'shall', 'note', 'notes', 'about', 'which', 'been', 'you', 'your',
-      'they', 'them', 'their', 'then', 'what', 'when', 'where', 'why', 'how', 'all'
-    ]);
-
-    const tfidfScores: Record<string, number> = {};
-
-    for (const word of allWords) {
-      if (stopWords.has(word)) continue;
-
-      let totalFreq = 0;
-      let docCount = 0;
-
-      for (const doc of documents) {
-        const freq = doc.filter(w => w === word).length;
-        if (freq > 0) {
-          totalFreq += freq;
-          docCount++;
-        }
-      }
-
-      const tf = totalFreq / documents.length;
-      const idf = Math.log(documents.length / (docCount + 1));
-      tfidfScores[word] = tf * idf;
-    }
-
-    const topKeywords = Object.entries(tfidfScores)
+    // Get top 2 most common words
+    const topWords = Object.entries(wordFreq)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
+      .slice(0, 2)
       .map(([word]) => word);
 
-    if (topKeywords.length > 0) {
-      const label = topKeywords
+    if (topWords.length > 0) {
+      const label = topWords
         .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
-        .slice(0, 3)
         .join(' ');
 
-      return { label, keywords: topKeywords.join(', ') };
+      return {
+        label: label || `Cluster ${notes.length}`,
+        keywords: `${notes.length} notes related to ${topWords.join(', ')}`
+      };
     }
 
-    return { label: `Cluster (${notes.length} notes)`, keywords: 'N/A' };
+    return {
+      label: `Cluster (${notes.length} notes)`,
+      keywords: `${notes.length} notes`
+    };
   } catch (error) {
-    return { label: `Cluster (${notes.length} notes)`, keywords: 'N/A' };
+    return {
+      label: `Cluster (${notes.length} notes)`,
+      keywords: `${notes.length} notes`
+    };
   }
 };
 
