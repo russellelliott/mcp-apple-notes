@@ -234,11 +234,12 @@ const runHDBSCAN = (vectors: number[][], minClusterSize = 2) => {
 };
 
 // Try to assign outliers to existing clusters based on proximity
-// Returns updated labels with some outliers (-1) reassigned to nearby clusters
+// Returns updated labels with only "close enough" outliers reassigned to nearby clusters
+// Outliers beyond the distance threshold remain as outliers
 const reassignOutliersToNearestCluster = (
   vectors: number[][],
   labels: number[],
-  distanceThreshold: number = 2.5
+  distanceThreshold: number = 2.0
 ): number[] => {
   const updatedLabels = [...labels];
   const outlierIndices = labels
@@ -251,9 +252,11 @@ const reassignOutliersToNearestCluster = (
   }
 
   console.log(`   🔍 Attempting to assign ${outlierIndices.length} outliers to existing clusters...`);
+  console.log(`   📏 Distance threshold: ${distanceThreshold.toFixed(2)}\n`);
 
   let reassigned = 0;
   let unchanged = 0;
+  const distanceStats: number[] = [];
 
   for (const outlierIdx of outlierIndices) {
     const outlierVector = vectors[outlierIdx];
@@ -286,7 +289,9 @@ const reassignOutliersToNearestCluster = (
       }
     }
 
-    // Reassign if within threshold
+    distanceStats.push(minDistance);
+
+    // Only reassign if within threshold
     if (nearestClusterId !== -1 && minDistance < distanceThreshold) {
       updatedLabels[outlierIdx] = nearestClusterId;
       reassigned++;
@@ -295,8 +300,17 @@ const reassignOutliersToNearestCluster = (
     }
   }
 
-  console.log(`   ✅ Reassigned ${reassigned} outliers to nearby clusters`);
-  console.log(`   📌 Kept as outliers: ${unchanged} notes (too distant from existing clusters)\n`);
+  // Show statistics
+  const avgDistance = distanceStats.reduce((a, b) => a + b, 0) / distanceStats.length;
+  const maxDistance = Math.max(...distanceStats);
+  const minDistanceVal = Math.min(...distanceStats);
+
+  console.log(`   📊 Distance Statistics:`);
+  console.log(`      • Min distance to nearest cluster: ${minDistanceVal.toFixed(2)}`);
+  console.log(`      • Avg distance to nearest cluster: ${avgDistance.toFixed(2)}`);
+  console.log(`      • Max distance to nearest cluster: ${maxDistance.toFixed(2)}`);
+  console.log(`   ✅ Reassigned ${reassigned} outliers to nearby clusters (within threshold)`);
+  console.log(`   📌 Kept as outliers: ${unchanged} notes (beyond distance threshold)\n`);
 
   return updatedLabels;
 };
@@ -347,14 +361,16 @@ const clusterRemainingOutliers = (
   return updatedLabels;
 };
 
-// Main clustering function
+// Main clustering function with configurable parameters
 export const clusterNotes = async (
   notesTable: any,
   minClusterSize = 2,
-  verbose = true
+  verbose = true,
+  distanceThreshold = 2.0
 ) => {
   const start = performance.now();
   if (verbose) console.log(`🔬 Starting note clustering...`);
+  if (verbose) console.log(`   Parameters: minClusterSize=${minClusterSize}, distanceThreshold=${distanceThreshold}\n`);
   
   // Step 1: Aggregate chunks to note-level embeddings
   const noteEmbeddings = await aggregateChunksToNotes(notesTable);
@@ -373,7 +389,7 @@ export const clusterNotes = async (
   if (verbose) console.log(`\n🔧 Two-Pass Outlier Refinement:`);
   
   // Pass 1: Try to assign outliers to existing clusters based on proximity
-  clusterLabels = reassignOutliersToNearestCluster(vectors, clusterLabels);
+  clusterLabels = reassignOutliersToNearestCluster(vectors, clusterLabels, distanceThreshold);
   
   // Pass 2: Run secondary HDBSCAN on any remaining isolated outliers
   const remainingOutlierIndices = clusterLabels
