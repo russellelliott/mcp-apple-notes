@@ -210,6 +210,11 @@ export const aggregateChunksToNotes = async (notesTable: any) => {
   return noteEmbeddings;
 };
 
+// Euclidean distance utility
+const euclideanDistance = (a: number[], b: number[]): number => {
+  return Math.sqrt(a.reduce((sum, val, i) => sum + Math.pow(val - b[i], 2), 0));
+};
+
 // HDBSCAN clustering - hierarchical density-based clustering
 // No epsilon parameter needed; automatically adapts to varying density clusters
 const runHDBSCAN = (vectors: number[][], minClusterSize = 2) => {
@@ -226,6 +231,120 @@ const runHDBSCAN = (vectors: number[][], minClusterSize = 2) => {
   
   console.log(`✅ HDBSCAN found ${totalClusters} clusters, ${outliers} outliers`);
   return labels;
+};
+
+// Try to assign outliers to existing clusters based on proximity
+// Returns updated labels with some outliers (-1) reassigned to nearby clusters
+const reassignOutliersToNearestCluster = (
+  vectors: number[][],
+  labels: number[],
+  distanceThreshold: number = 2.5
+): number[] => {
+  const updatedLabels = [...labels];
+  const outlierIndices = labels
+    .map((label, idx) => (label === -1 ? idx : -1))
+    .filter((idx) => idx !== -1);
+
+  if (outlierIndices.length === 0) {
+    console.log(`   ℹ️ No outliers to reassign`);
+    return updatedLabels;
+  }
+
+  console.log(`   🔍 Attempting to assign ${outlierIndices.length} outliers to existing clusters...`);
+
+  let reassigned = 0;
+  let unchanged = 0;
+
+  for (const outlierIdx of outlierIndices) {
+    const outlierVector = vectors[outlierIdx];
+    let nearestClusterId = -1;
+    let minDistance = Infinity;
+
+    // Find the closest cluster centroid
+    for (let clusterIdx = 0; clusterIdx < Math.max(...labels) + 1; clusterIdx++) {
+      if (clusterIdx === -1) continue;
+
+      // Get all points in this cluster
+      const clusterPoints = labels
+        .map((label, idx) => (label === clusterIdx ? idx : -1))
+        .filter((idx) => idx !== -1)
+        .map((idx) => vectors[idx]);
+
+      if (clusterPoints.length === 0) continue;
+
+      // Calculate centroid of this cluster
+      const centroid = clusterPoints[0].map((_, dimIdx) =>
+        clusterPoints.reduce((sum, point) => sum + point[dimIdx], 0) / clusterPoints.length
+      );
+
+      // Distance from outlier to centroid
+      const distance = euclideanDistance(outlierVector, centroid);
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        nearestClusterId = clusterIdx;
+      }
+    }
+
+    // Reassign if within threshold
+    if (nearestClusterId !== -1 && minDistance < distanceThreshold) {
+      updatedLabels[outlierIdx] = nearestClusterId;
+      reassigned++;
+    } else {
+      unchanged++;
+    }
+  }
+
+  console.log(`   ✅ Reassigned ${reassigned} outliers to nearby clusters`);
+  console.log(`   📌 Kept as outliers: ${unchanged} notes (too distant from existing clusters)\n`);
+
+  return updatedLabels;
+};
+
+// Run secondary HDBSCAN clustering on remaining outliers
+const clusterRemainingOutliers = (
+  vectors: number[][],
+  labels: number[],
+  outlierIndices: number[]
+) => {
+  if (outlierIndices.length === 0) {
+    console.log(`   ℹ️ No remaining outliers to cluster`);
+    return labels;
+  }
+
+  console.log(`   🔬 Running secondary HDBSCAN on ${outlierIndices.length} isolated notes...`);
+
+  // Extract vectors for remaining outliers
+  const outlierVectors = outlierIndices.map((idx) => vectors[idx]);
+
+  // Use lower minClusterSize (1) to be more permissive with secondary clusters
+  const hdbscan = new HDBSCAN({ minClusterSize: 1 });
+  const secondaryLabels = hdbscan.fit(outlierVectors);
+
+  // Map secondary cluster IDs to new cluster IDs (avoiding conflicts with existing clusters)
+  const maxExistingClusterId = Math.max(...labels.filter((l) => l !== -1));
+  const updatedLabels = [...labels];
+  let secondaryClustersCreated = 0;
+
+  for (let i = 0; i < outlierIndices.length; i++) {
+    const originalIdx = outlierIndices[i];
+    const secondaryLabel = secondaryLabels[i];
+
+    if (secondaryLabel !== -1) {
+      // Map to new cluster ID
+      const newClusterId = maxExistingClusterId + 1 + secondaryLabel;
+      updatedLabels[originalIdx] = newClusterId;
+      secondaryClustersCreated++;
+    }
+  }
+
+  const secondaryClustersCount = new Set(secondaryLabels.filter((l) => l !== -1)).size;
+  const stillOutliers = secondaryLabels.filter((l) => l === -1).length;
+
+  console.log(`   ✅ Created ${secondaryClustersCount} secondary clusters`);
+  console.log(`   📌 Still isolated: ${stillOutliers} notes\n`);
+
+  return updatedLabels;
 };
 
 // Main clustering function
@@ -247,8 +366,23 @@ export const clusterNotes = async (
   // Step 2: Extract vectors for clustering
   const vectors = noteEmbeddings.map((n) => n.embedding);
   
-  // Step 3: Run clustering
-  const clusterLabels = runHDBSCAN(vectors, minClusterSize);
+  // Step 3: Run initial HDBSCAN clustering
+  let clusterLabels = runHDBSCAN(vectors, minClusterSize);
+  
+  // Step 3.5: Two-pass refinement
+  if (verbose) console.log(`\n🔧 Two-Pass Outlier Refinement:`);
+  
+  // Pass 1: Try to assign outliers to existing clusters based on proximity
+  clusterLabels = reassignOutliersToNearestCluster(vectors, clusterLabels);
+  
+  // Pass 2: Run secondary HDBSCAN on any remaining isolated outliers
+  const remainingOutlierIndices = clusterLabels
+    .map((label, idx) => (label === -1 ? idx : -1))
+    .filter((idx) => idx !== -1);
+  
+  if (remainingOutlierIndices.length > 0) {
+    clusterLabels = clusterRemainingOutliers(vectors, clusterLabels, remainingOutlierIndices);
+  }
   
   // Step 4: Group notes by cluster
   const clusters = new Map();
