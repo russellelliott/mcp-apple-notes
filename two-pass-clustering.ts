@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { clusterNotes, listClusters, getNotesInCluster, aggregateChunksToNotes } from "./index.js";
+import { clusterNotes, listClusters, getNotesInCluster, aggregateChunksToNotes, generateClusterLabel } from "./index.js";
 import * as lancedb from "@lancedb/lancedb";
 
 // ===== CONFIGURATION =====
@@ -341,6 +341,27 @@ async function twoPassClustering(useTopicModeling: boolean = false) {
               }
             }
             
+            // After assigning the new cluster id, generate a label & summary and persist them
+            try {
+              const notesInNewCluster = await getNotesInCluster(notesTable, newClusterId);
+              const { label, keywords } = generateClusterLabel(notesInNewCluster);
+              for (const n of notesInNewCluster) {
+                try {
+                  await notesTable.update({
+                    where: `title = '${n.title.replace(/'/g, "''")}' AND creation_date = '${n.creation_date}'`,
+                    values: {
+                      cluster_label: label,
+                      cluster_summary: `${notesInNewCluster.length} notes: ${keywords}`
+                    }
+                  });
+                } catch (e) {
+                  // ignore per-note update errors
+                }
+              }
+            } catch (e) {
+              // ignore label generation errors
+            }
+
             secondaryClusterCount++;
             clusterIdCounter++;
           }

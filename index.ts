@@ -17,7 +17,7 @@ import {
   register,
 } from "@lancedb/lancedb/embedding";
 import { type Float, Float32, Utf8 } from "apache-arrow";
-import { pipeline } from "@huggingface/transformers";
+import { pipeline as hfPipeline } from "@huggingface/transformers";
 
 // Install with: bun add hdbscan-ts
 // Hierarchical density-based clustering
@@ -262,37 +262,117 @@ export const clusterNotes = async (
     });
   });
   
-  // Step 5: Generate cluster labels and summaries
+  // Step 5: Generate cluster labels and summaries using TF-IDF keyword extraction
   const clusterSummaries = new Map();
+  
+  // Helper: Extract keywords using custom TF-IDF implementation
+  const extractKeywords = (notes: any[]): { label: string; keywords: string } => {
+    if (notes.length === 0) return { label: 'Empty', keywords: '' };
+    
+    try {
+      // URL/metadata filtering regex
+      const urlRegex = /https?:\/\/\S+|www\.\S+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+      
+      // Clean and tokenize documents
+      const documents: string[][] = [];
+      const allWords = new Set<string>();
+      
+      notes.forEach((note: any) => {
+        // Clean text: remove URLs, emails, and markdown syntax
+        let cleanText = `${note.title} ${note.content || ''}`;
+        cleanText = cleanText
+          .replace(urlRegex, '') // Remove URLs and emails
+          .replace(/#+\s/g, '') // Remove markdown headers
+          .replace(/[\[\](){}*_\-`]/g, ' ') // Remove markdown symbols
+          .toLowerCase()
+          .replace(/[^\w\s]/g, ' ') // Remove special chars
+          .replace(/\s+/g, ' ') // Normalize whitespace
+          .trim();
+        
+        // Tokenize and filter short words
+        const tokens = cleanText.split(/\s+/).filter(w => w.length > 2);
+        documents.push(tokens);
+        tokens.forEach(w => allWords.add(w));
+      });
+      
+      // Stop words to filter
+      const stopWords = new Set([
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 
+        'is', 'are', 'was', 'were', 'that', 'this', 'be', 'as', 'by', 'from', 'have', 'it',
+        'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+        'can', 'must', 'shall', 'note', 'notes', 'about', 'which', 'been', 'you', 'your',
+        'they', 'them', 'their', 'then', 'what', 'when', 'where', 'why', 'how', 'all'
+      ]);
+      
+      // Calculate TF-IDF scores
+      const tfidfScores: Record<string, number> = {};
+      
+      for (const word of allWords) {
+        if (stopWords.has(word)) continue;
+        
+        // Term Frequency
+        let totalFreq = 0;
+        let docCount = 0;
+        
+        for (const doc of documents) {
+          const freq = doc.filter(w => w === word).length;
+          if (freq > 0) {
+            totalFreq += freq;
+            docCount++;
+          }
+        }
+        
+        // TF-IDF = TF * log(IDF)
+        const tf = totalFreq / documents.length;
+        const idf = Math.log(documents.length / (docCount + 1));
+        tfidfScores[word] = tf * idf;
+      }
+      
+      // Sort and get top keywords
+      const topKeywords = Object.entries(tfidfScores)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([word]) => word);
+      
+      if (topKeywords.length > 0) {
+        // Create label from top keywords
+        const label = topKeywords
+          .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+          .slice(0, 3)
+          .join(' ');
+        
+        return {
+          label: label,
+          keywords: topKeywords.join(', ')
+        };
+      } else {
+        return {
+          label: `Cluster (${notes.length} notes)`,
+          keywords: 'N/A'
+        };
+      }
+    } catch (error) {
+      console.warn(`⚠️ Keyword extraction error:`, (error as any).message);
+      return {
+        label: `Cluster (${notes.length} notes)`,
+        keywords: 'N/A'
+      };
+    }
+  };
+  
   for (const [clusterId, notes] of clusters.entries()) {
     if (clusterId === -1) {
       clusterSummaries.set(clusterId, {
         label: "Uncategorized",
-        summary: "Notes that don't fit into any specific cluster",
-        confidence: "0.0"
+        summary: "Notes that don't fit into any specific cluster"
       });
     } else {
-      // Simple label generation based on most common words in titles
-      const allTitles = notes.map(n => n.title).join(' ');
-      const words = allTitles.toLowerCase()
-        .replace(/[^\w\s]/g, '')
-        .split(/\s+/)
-        .filter(word => word.length > 3);
-      
-      const wordCounts = words.reduce((acc, word) => {
-        acc[word] = (acc[word] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>);
-      
-      const topWords = Object.entries(wordCounts)
-        .sort(([,a], [,b]) => b - a)
-        .slice(0, 2)
-        .map(([word]) => word);
+  // Extract keywords using TF-IDF
+  const { label, keywords } = generateClusterLabel(notes);
       
       clusterSummaries.set(clusterId, {
-        label: topWords.length > 0 ? topWords.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') : `Cluster ${clusterId}`,
-        summary: `${notes.length} notes related to ${topWords.join(', ')}`,
-        confidence: "0.8"
+        label: label,
+        summary: `${notes.length} notes: ${keywords}`
       });
     }
   }
@@ -311,7 +391,6 @@ export const clusterNotes = async (
           values: {
             cluster_id: clusterId.toString(),
             cluster_label: clusterInfo.label,
-            cluster_confidence: clusterInfo.confidence,
             cluster_summary: clusterInfo.summary,
             last_clustered: new Date().toISOString()
           }
@@ -438,8 +517,85 @@ export const listClusters = async (notesTable: any) => {
   return clusters;
 };
 
+// Exported helper: generate cluster label & keywords from an array of notes
+export const generateClusterLabel = (notes: any[]): { label: string; keywords: string } => {
+  if (!notes || notes.length === 0) return { label: 'Empty', keywords: '' };
+
+  try {
+    // URL/metadata filtering regex
+    const urlRegex = /https?:\/\/\S+|www\.\S+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+    // Clean and tokenize documents
+    const documents: string[][] = [];
+    const allWords = new Set<string>();
+
+    notes.forEach((note: any) => {
+      let cleanText = `${note.title} ${note.content || ''}`;
+      cleanText = cleanText
+        .replace(urlRegex, '')
+        .replace(/#+\s/g, '')
+        .replace(/[\[\](){}*_\-`]/g, ' ')
+        .toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const tokens = cleanText.split(/\s+/).filter(w => w.length > 2);
+      documents.push(tokens);
+      tokens.forEach(w => allWords.add(w));
+    });
+
+    const stopWords = new Set([
+      'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
+      'is', 'are', 'was', 'were', 'that', 'this', 'be', 'as', 'by', 'from', 'have', 'it',
+      'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+      'can', 'must', 'shall', 'note', 'notes', 'about', 'which', 'been', 'you', 'your',
+      'they', 'them', 'their', 'then', 'what', 'when', 'where', 'why', 'how', 'all'
+    ]);
+
+    const tfidfScores: Record<string, number> = {};
+
+    for (const word of allWords) {
+      if (stopWords.has(word)) continue;
+
+      let totalFreq = 0;
+      let docCount = 0;
+
+      for (const doc of documents) {
+        const freq = doc.filter(w => w === word).length;
+        if (freq > 0) {
+          totalFreq += freq;
+          docCount++;
+        }
+      }
+
+      const tf = totalFreq / documents.length;
+      const idf = Math.log(documents.length / (docCount + 1));
+      tfidfScores[word] = tf * idf;
+    }
+
+    const topKeywords = Object.entries(tfidfScores)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([word]) => word);
+
+    if (topKeywords.length > 0) {
+      const label = topKeywords
+        .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+        .slice(0, 3)
+        .join(' ');
+
+      return { label, keywords: topKeywords.join(', ') };
+    }
+
+    return { label: `Cluster (${notes.length} notes)`, keywords: 'N/A' };
+  } catch (error) {
+    return { label: `Cluster (${notes.length} notes)`, keywords: 'N/A' };
+  }
+};
+
 // Update to better embedding model
-const extractor = await pipeline(
+const extractor = await hfPipeline(
   "feature-extraction",
   "Xenova/bge-small-en-v1.5" // Better model for semantic search
 );

@@ -14,6 +14,7 @@
         "esbuild": "0.25.5",
         "hdbscan-ts": "^1.0.16",
         "run-jxa": "^3.0.0",
+        "tfidf": "^0.2.2",
         "turndown": "^7.2.0",
         "zod": "^3.24.1",
       },
@@ -520,6 +521,8 @@
     "table-layout": ["table-layout@4.1.1", "", { "dependencies": { "array-back": "^6.2.2", "wordwrapjs": "^5.1.0" } }, "sha512-iK5/YhZxq5GO5z8wb0bY1317uDF3Zjpha0QFFLA8/trAoiLbQD0HUbMesEaxyzUgDxi2QlcbM8IvqOlEjgoXBA=="],
 
     "tar": ["tar@7.4.3", "", { "dependencies": { "@isaacs/fs-minipass": "^4.0.0", "chownr": "^3.0.0", "minipass": "^7.1.2", "minizlib": "^3.0.1", "mkdirp": "^3.0.1", "yallist": "^5.0.0" } }, "sha512-5S7Va8hKfV7W5U6g3aYxXmlPoZVAwUMy9AOKyF2fVuZa2UD3qZjg578OrLRt8PcNN1PleVaL/5/yYATNL0ICUw=="],
+
+    "tfidf": ["tfidf@0.2.2", "", {}, "sha512-ieezy4TVtNy1dLM9x+gXH5itl9o4Eb9utbdAixuzOsJ+PyvP8tjODyzuP/DE2uxEM21k7eyCNKA6ow+iguJYzA=="],
 
     "toidentifier": ["toidentifier@1.0.1", "", {}, "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA=="],
 
