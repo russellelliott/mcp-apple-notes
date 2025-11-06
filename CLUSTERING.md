@@ -473,10 +473,10 @@ Benefit: Automatically adapts to your data
 
 The semantic clustering system provides:
 
-✅ **No tuning required** — Works out of the box
-✅ **One configurable parameter** — `minClusterSize` for granularity control
-✅ **Semantic awareness** — Quality scores prevent cluster pollution
-✅ **Transparent output** — See exactly why each decision was made
-✅ **Scalable** — Improves as your note collection grows
+- ✅ **No tuning required** — Works out of the box
+- ✅ **One configurable parameter** — `minClusterSize` for granularity control
+- ✅ **Semantic awareness** — Quality scores prevent cluster pollution
+- ✅ **Transparent output** — See exactly why each decision was made
+- ✅ **Scalable** — Improves as your note collection grows
 
 Use `bun two-pass-clustering-v2.ts` for semantic clustering, and adjust `--min-size` if you want different granularity levels.
