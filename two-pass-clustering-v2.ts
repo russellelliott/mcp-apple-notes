@@ -45,13 +45,15 @@ async function twoPassClusteringV2() {
   
   console.log("🎯 Two-Pass Clustering with Semantic Quality Scoring\n");
   console.log("Configuration:");
-  console.log(`  • minClusterSize: ${minClusterSize} (HDBSCAN min points per cluster)`);
-  console.log(`  • Outlier Evaluation: Semantic quality score (0-1 scale)`);
-  console.log(`  • Reassignment Threshold: Quality score ≥ 0.65\n`);
+  console.log(`  • minClusterSize: ${minClusterSize} (initial HDBSCAN density threshold)`);
+  console.log(`  • Outlier Evaluation: Semantic quality score (0-1 scale, cosine similarity)`);
+  console.log(`  • Reassignment Strategy: Dynamic threshold (uses average quality score)\n`);
   
-  console.log("Pass 1: Initial HDBSCAN clustering");
-  console.log("Pass 1.5: Semantic quality evaluation (only reassign high-quality fits)");
-  console.log("Pass 2: Secondary HDBSCAN on remaining isolated notes\n");
+  console.log("Clustering Pipeline:");
+  console.log("  1️⃣  Initial HDBSCAN: Find dense clusters respecting variable shapes");
+  console.log("  2️⃣  Quality Evaluation: Assess semantic fit of outliers to clusters");
+  console.log("  3️⃣  Dynamic Filtering: Reassign only outliers with quality > average");
+  console.log("  4️⃣  Secondary HDBSCAN: Cluster remaining isolated notes (minClusterSize=1)\n");
   
   try {
     const db = await lancedb.connect(`${process.env.HOME}/.mcp-apple-notes/data`);
@@ -72,8 +74,10 @@ async function twoPassClusteringV2() {
     console.log(`\n✅ Clustering Results:`);
     console.log(`   • Primary clusters: ${clusterResult.totalClusters}`);
     console.log(`   • Total notes: ${clusterResult.totalNotes}`);
-    console.log(`   • Notes clustered: ${clusterResult.totalNotes - clusterResult.outliers} (${(((clusterResult.totalNotes - clusterResult.outliers) / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
-    console.log(`   • Remaining outliers: ${clusterResult.outliers} (${((clusterResult.outliers / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`   • Notes in primary clusters: ${clusterResult.totalNotes - clusterResult.outliers} (${(((clusterResult.totalNotes - clusterResult.outliers) / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`   • Secondary clusters created: ${clusterResult.clusterSizes.length - clusterResult.totalClusters}`);
+    console.log(`   • Remaining true outliers: ${clusterResult.outliers} (${((clusterResult.outliers / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`   • Quality threshold used: ${clusterResult.qualityThreshold.toFixed(3)} (dynamic average)`);
     console.log(`   • Time: ${clusterResult.timeSeconds.toFixed(1)}s\n`);
     
     // ===== CLUSTER SIZE DISTRIBUTION =====
@@ -137,16 +141,19 @@ async function twoPassClusteringV2() {
     
     console.log(`Results:`);
     console.log(`  • Total notes: ${clusterResult.totalNotes}`);
-    console.log(`  • Total clusters: ${finalRealClusters.length}`);
+    console.log(`  • Total clusters (primary + secondary): ${finalRealClusters.length}`);
+    console.log(`  • Primary clusters: ${clusterResult.totalClusters}`);
+    console.log(`  • Secondary clusters: ${finalRealClusters.length - clusterResult.totalClusters}`);
     console.log(`  • Notes in clusters: ${totalClustered} (${((totalClustered / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
-    console.log(`  • Remaining outliers: ${outlierCluster.length} (${((outlierCluster.length / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`  • Remaining true outliers: ${outlierCluster.length} (${((outlierCluster.length / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
     console.log(`  • Processing time: ${clusterResult.timeSeconds.toFixed(1)}s`);
+    console.log(`  • Quality threshold (semantic fit): ${clusterResult.qualityThreshold.toFixed(3)}`);
     
     console.log(`\n✨ Semantic-aware clustering complete!`);
     console.log(`   💾 All changes persisted to database`);
-    console.log(`   � Using quality scores (0-1) for semantic evaluation`);
-    console.log(`   🎯 Only high-quality reassignments (score ≥ 0.65)`);
-    console.log(`   🔄 HDBSCAN throughout (respects variable cluster shapes)`);
+    console.log(`   🎯 Dynamic threshold: ${clusterResult.qualityThreshold.toFixed(3)} (avg quality score)`);
+    console.log(`   📊 Quality scores: 0-1 scale (0=unrelated, 1=identical)`);
+    console.log(`   🔄 HDBSCAN throughout (respects variable cluster shapes/densities)`);
     
     if (outlierCluster.length === 0) {
       console.log("\n🎉 Full coverage: All notes are now clustered!");

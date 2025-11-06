@@ -390,7 +390,7 @@ const reassignOutliersToNearestCluster = (
   console.log(`   ✅ Reassigned ${reassigned} outliers (quality score > ${dynamicThreshold.toFixed(3)})`);
   console.log(`   📌 Rejected ${rejected} outliers (quality score ≤ ${dynamicThreshold.toFixed(3)})\n`);
 
-  return { updatedLabels, effectiveThreshold: avgDistance };
+  return { updatedLabels, effectiveThreshold: dynamicThreshold };
 };
 
 // Run secondary HDBSCAN clustering on remaining outliers
@@ -657,7 +657,8 @@ export const clusterNotes = async (
         size: notes.length
       }))
       .sort((a, b) => b.size - a.size),
-    timeSeconds: totalTime
+    timeSeconds: totalTime,
+    qualityThreshold: effectiveThreshold
   };
 };
 
