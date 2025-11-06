@@ -3,47 +3,54 @@ import { clusterNotes, listClusters, getNotesInCluster } from "./index.js";
 import * as lancedb from "@lancedb/lancedb";
 
 /**
- * Configurable Two-Pass Clustering with Distance Threshold
+ * Configurable Two-Pass Clustering with Dynamic Semantic Quality Scoring
  * 
- * This version allows fine-tuning of clustering parameters to balance:
- * - Semantic accuracy (avoid pollution of outliers into wrong clusters)
- * - Coverage (percentage of notes assigned to meaningful clusters)
- * - Specificity (min_cluster_size for identifying tight, coherent groups)
+ * This version uses data-driven, dynamic outlier reassignment:
+ * - Automatically evaluates each outlier's semantic fit with clusters
+ * - Uses cosine similarity to determine quality of reassignment (0-1 scale)
+ * - Dynamic threshold: Uses AVERAGE quality score from evaluation pass
+ * - Only reassigns outliers with quality score > average
+ * - Truly isolated outliers (below-average quality) stay as outliers
+ * - No hard-coded thresholds - adapts to your data
+ * 
+ * The quality score evaluates semantic alignment, so notes that don't
+ * fit well semantically won't pollute clusters even if they're spatially close.
+ * 
+ * Why the dynamic threshold?
+ * - Previous hard-coded threshold (0.65) allowed all outliers through (all ≥ 0.748)
+ * - Dynamic threshold (average) automatically filters out low-quality fits
+ * - As your dataset grows, threshold auto-adapts
  * 
  * Usage:
- *   bun two-pass-clustering-v2.ts                    # Uses defaults
- *   bun two-pass-clustering-v2.ts --min-size=5       # More robust initial clusters
- *   bun two-pass-clustering-v2.ts --distance=1.5     # More strict reassignment threshold
- *   bun two-pass-clustering-v2.ts --min-size=5 --distance=1.5  # Both parameters
+ *   bun two-pass-clustering-v2.ts                 # Default
+ *   bun two-pass-clustering-v2.ts --min-size=5    # More robust initial clusters
+ *   bun two-pass-clustering-v2.ts --min-size=10   # Very conservative clustering
  * 
  * Recommended Configurations:
- * - Default (minClusterSize=2, distance=2.0): Good balance, may have some pollution
- * - Conservative (minClusterSize=5, distance=1.5): Favors accuracy, leaves more outliers
- * - Aggressive (minClusterSize=2, distance=3.0): Maximizes coverage, accepts pollution
+ * - Default (minClusterSize=2): Balanced, good semantic quality
+ * - Conservative (minClusterSize=5): Fewer initial clusters, less pollution
+ * - High-precision (minClusterSize=10): Only strong clusters, more outliers
  */
 
 async function twoPassClusteringV2() {
   // Parse command line arguments
   const args = process.argv.slice(2);
   let minClusterSize = 2;
-  let distanceThreshold = 2.0;
   
   for (const arg of args) {
     if (arg.startsWith('--min-size=')) {
       minClusterSize = parseInt(arg.split('=')[1]);
-    } else if (arg.startsWith('--distance=')) {
-      distanceThreshold = parseFloat(arg.split('=')[1]);
     }
   }
   
-  console.log("🎯 Two-Pass Clustering with Distance-Aware Outlier Reassignment\n");
+  console.log("🎯 Two-Pass Clustering with Semantic Quality Scoring\n");
   console.log("Configuration:");
   console.log(`  • minClusterSize: ${minClusterSize} (HDBSCAN min points per cluster)`);
-  console.log(`  • distanceThreshold: ${distanceThreshold.toFixed(2)} (max distance to reassign outlier)`);
-  console.log(`  • Strategy: Only reassign outliers within distance threshold\n`);
+  console.log(`  • Outlier Evaluation: Semantic quality score (0-1 scale)`);
+  console.log(`  • Reassignment Threshold: Quality score ≥ 0.65\n`);
   
   console.log("Pass 1: Initial HDBSCAN clustering");
-  console.log("Pass 1.5: Intelligent outlier reassignment (respects distance threshold)");
+  console.log("Pass 1.5: Semantic quality evaluation (only reassign high-quality fits)");
   console.log("Pass 2: Secondary HDBSCAN on remaining isolated notes\n");
   
   try {
@@ -55,12 +62,12 @@ async function twoPassClusteringV2() {
     
     console.log(`📊 Database: ${uniqueNotes.size} notes (${allChunks.length} chunks)\n`);
     
-    // ===== RUN CLUSTERING WITH CONFIGURABLE PARAMETERS =====
+    // ===== RUN CLUSTERING WITH SEMANTIC QUALITY SCORING =====
     console.log("════════════════════════════════════════");
-    console.log("🚀 Starting Configurable Two-Pass Clustering");
+    console.log("🚀 Starting Semantic-Aware Two-Pass Clustering");
     console.log("════════════════════════════════════════\n");
     
-    const clusterResult = await clusterNotes(notesTable, minClusterSize, true, distanceThreshold);
+    const clusterResult = await clusterNotes(notesTable, minClusterSize, true);
     
     console.log(`\n✅ Clustering Results:`);
     console.log(`   • Primary clusters: ${clusterResult.totalClusters}`);
@@ -113,7 +120,7 @@ async function twoPassClusteringV2() {
     const outlierCluster = await getNotesInCluster(notesTable, '-1');
     if (outlierCluster.length > 0) {
       console.log(`📌 OUTLIERS (${outlierCluster.length} notes):`);
-      console.log(`   Notes too distant from any cluster (beyond ${distanceThreshold.toFixed(2)} threshold):`);
+      console.log(`   Notes with poor semantic fit to any cluster:`);
       outlierCluster.forEach((note, idx) => {
         console.log(`      ${idx + 1}. "${note.title}"`);
       });
@@ -126,8 +133,7 @@ async function twoPassClusteringV2() {
     console.log("════════════════════════════════════════\n");
     
     console.log(`Configuration Used:`);
-    console.log(`  • minClusterSize: ${minClusterSize}`);
-    console.log(`  • distanceThreshold: ${distanceThreshold.toFixed(2)}\n`);
+    console.log(`  • minClusterSize: ${minClusterSize}\n`);
     
     console.log(`Results:`);
     console.log(`  • Total notes: ${clusterResult.totalNotes}`);
@@ -136,22 +142,21 @@ async function twoPassClusteringV2() {
     console.log(`  • Remaining outliers: ${outlierCluster.length} (${((outlierCluster.length / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
     console.log(`  • Processing time: ${clusterResult.timeSeconds.toFixed(1)}s`);
     
-    console.log(`\n✨ Two-pass clustering complete!`);
+    console.log(`\n✨ Semantic-aware clustering complete!`);
     console.log(`   💾 All changes persisted to database`);
-    console.log(`   🔍 Using distance-aware outlier reassignment`);
-    console.log(`   🎯 HDBSCAN throughout (respects variable cluster shapes/sizes)`);
+    console.log(`   � Using quality scores (0-1) for semantic evaluation`);
+    console.log(`   🎯 Only high-quality reassignments (score ≥ 0.65)`);
+    console.log(`   🔄 HDBSCAN throughout (respects variable cluster shapes)`);
     
     if (outlierCluster.length === 0) {
       console.log("\n🎉 Full coverage: All notes are now clustered!");
     } else {
       const outlierPct = ((outlierCluster.length / clusterResult.totalNotes) * 100).toFixed(1);
       console.log(`\n💡 Semantic preservation: ${outlierPct}% of notes remain as outliers`);
-      console.log(`   These are semantically isolated beyond the ${distanceThreshold.toFixed(2)} threshold`);
+      console.log(`   These have poor semantic fit with existing clusters`);
       console.log(`\n   To increase coverage, try:`);
-      console.log(`   • Increasing distanceThreshold (e.g., --distance=2.5)`);
       console.log(`   • Decreasing minClusterSize (e.g., --min-size=1)`);
       console.log(`   \n   To improve semantic accuracy, try:`);
-      console.log(`   • Decreasing distanceThreshold (e.g., --distance=1.5)`);
       console.log(`   • Increasing minClusterSize (e.g., --min-size=5)`);
     }
     

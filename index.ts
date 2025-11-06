@@ -233,14 +233,46 @@ const runHDBSCAN = (vectors: number[][], minClusterSize = 2) => {
   return labels;
 };
 
-// Try to assign outliers to existing clusters based on proximity
-// Returns updated labels with only "close enough" outliers reassigned to nearby clusters
-// Outliers beyond the distance threshold remain as outliers
+// Calculate semantic "quality score" for outlier assignment
+// Evaluates how well an outlier semantically fits with a cluster
+// Returns score 0-1 where 1 = perfect fit
+const calculateQualityScore = (
+  outlierVector: number[],
+  clusterPoints: number[][],
+  clusterEmbeddings: any[] // Original note embeddings with content
+): number => {
+  if (clusterPoints.length === 0) return 0;
+
+  // Similarity of the outlier to cluster centroid (cosine similarity)
+  const centroid = clusterPoints[0].map((_, dimIdx) =>
+    clusterPoints.reduce((sum, point) => sum + point[dimIdx], 0) / clusterPoints.length
+  );
+
+  // Cosine similarity: higher = more aligned
+  const dotProduct = outlierVector.reduce((sum, val, i) => sum + val * centroid[i], 0);
+  const magnitudeOutlier = Math.sqrt(outlierVector.reduce((sum, val) => sum + val * val, 0));
+  const magnitudeCentroid = Math.sqrt(centroid.reduce((sum, val) => sum + val * val, 0));
+
+  let cosineSimilarity = 0;
+  if (magnitudeOutlier > 0 && magnitudeCentroid > 0) {
+    cosineSimilarity = dotProduct / (magnitudeOutlier * magnitudeCentroid);
+  }
+
+  // Normalize to 0-1 range (cosine similarity ranges from -1 to 1)
+  const normalizedSimilarity = (cosineSimilarity + 1) / 2;
+
+  return normalizedSimilarity;
+};
+
+// Try to assign outliers to existing clusters based on proximity and semantic fit
+// Returns updated labels with only "good fit" outliers reassigned to nearby clusters
+// Outliers that don't fit well semantically remain as outliers
 const reassignOutliersToNearestCluster = (
   vectors: number[][],
   labels: number[],
-  distanceThreshold: number = 2.0
-): number[] => {
+  noteEmbeddings: any[],
+  distanceThresholdOverride?: number
+): { updatedLabels: number[]; effectiveThreshold: number } => {
   const updatedLabels = [...labels];
   const outlierIndices = labels
     .map((label, idx) => (label === -1 ? idx : -1))
@@ -248,39 +280,52 @@ const reassignOutliersToNearestCluster = (
 
   if (outlierIndices.length === 0) {
     console.log(`   ℹ️ No outliers to reassign`);
-    return updatedLabels;
+    return { updatedLabels, effectiveThreshold: 0 };
   }
 
-  console.log(`   🔍 Attempting to assign ${outlierIndices.length} outliers to existing clusters...`);
-  console.log(`   📏 Distance threshold: ${distanceThreshold.toFixed(2)}\n`);
+  console.log(`   🔍 Evaluating ${outlierIndices.length} outliers for semantic fit...\n`);
 
   let reassigned = 0;
-  let unchanged = 0;
+  let rejected = 0;
   const distanceStats: number[] = [];
+  const qualityScores: number[] = [];
+
+  // Build cluster information
+  const clusterInfo = new Map<number, { points: number[][]; embeddings: any[] }>();
+  for (let clusterIdx = 0; clusterIdx < Math.max(...labels) + 1; clusterIdx++) {
+    if (clusterIdx === -1) continue;
+
+    const clusterPoints = labels
+      .map((label, idx) => (label === clusterIdx ? idx : -1))
+      .filter((idx) => idx !== -1);
+
+    if (clusterPoints.length > 0) {
+      clusterInfo.set(clusterIdx, {
+        points: clusterPoints.map((idx) => vectors[idx]),
+        embeddings: clusterPoints.map((idx) => noteEmbeddings[idx])
+      });
+    }
+  }
+
+  // Evaluate each outlier - first pass: collect quality scores
+  const outlierEvaluations: Array<{
+    idx: number;
+    distance: number;
+    qualityScore: number;
+    clusterId: number;
+  }> = [];
 
   for (const outlierIdx of outlierIndices) {
     const outlierVector = vectors[outlierIdx];
     let nearestClusterId = -1;
     let minDistance = Infinity;
 
-    // Find the closest cluster centroid
-    for (let clusterIdx = 0; clusterIdx < Math.max(...labels) + 1; clusterIdx++) {
-      if (clusterIdx === -1) continue;
-
-      // Get all points in this cluster
-      const clusterPoints = labels
-        .map((label, idx) => (label === clusterIdx ? idx : -1))
-        .filter((idx) => idx !== -1)
-        .map((idx) => vectors[idx]);
-
-      if (clusterPoints.length === 0) continue;
-
-      // Calculate centroid of this cluster
+    // Find the closest cluster
+    for (const [clusterIdx, { points: clusterPoints }] of clusterInfo) {
       const centroid = clusterPoints[0].map((_, dimIdx) =>
         clusterPoints.reduce((sum, point) => sum + point[dimIdx], 0) / clusterPoints.length
       );
 
-      // Distance from outlier to centroid
       const distance = euclideanDistance(outlierVector, centroid);
 
       if (distance < minDistance) {
@@ -289,30 +334,63 @@ const reassignOutliersToNearestCluster = (
       }
     }
 
+    if (nearestClusterId === -1) continue;
+
     distanceStats.push(minDistance);
 
-    // Only reassign if within threshold
-    if (nearestClusterId !== -1 && minDistance < distanceThreshold) {
-      updatedLabels[outlierIdx] = nearestClusterId;
+    // Calculate quality score for this assignment
+    const clusterData = clusterInfo.get(nearestClusterId)!;
+    const qualityScore = calculateQualityScore(outlierVector, clusterData.points, clusterData.embeddings);
+    qualityScores.push(qualityScore);
+
+    outlierEvaluations.push({
+      idx: outlierIdx,
+      distance: minDistance,
+      qualityScore,
+      clusterId: nearestClusterId
+    });
+  }
+
+  // Calculate average quality score as dynamic threshold
+  const avgQualityForThreshold = qualityScores.length > 0
+    ? qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length
+    : 0;
+
+  // Second pass: make reassignment decisions based on dynamic threshold
+  for (const evaluation of outlierEvaluations) {
+    // Decision: reassign only if quality score is ABOVE average
+    // This ensures we filter out the lower-quality fits while keeping high-quality ones
+    if (evaluation.qualityScore > avgQualityForThreshold) {
+      updatedLabels[evaluation.idx] = evaluation.clusterId;
       reassigned++;
     } else {
-      unchanged++;
+      rejected++;
     }
   }
 
-  // Show statistics
+  // Calculate statistics for reporting
   const avgDistance = distanceStats.reduce((a, b) => a + b, 0) / distanceStats.length;
-  const maxDistance = Math.max(...distanceStats);
+  const avgQualityScore = qualityScores.length > 0
+    ? qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length
+    : 0;
+
   const minDistanceVal = Math.min(...distanceStats);
+  const maxDistanceVal = Math.max(...distanceStats);
+  const minQualityScore = Math.min(...qualityScores);
+  const maxQualityScore = Math.max(...qualityScores);
+
+  // Note: avgQualityForThreshold was already calculated above and used for reassignment decisions
+  const dynamicThreshold = avgQualityForThreshold;
 
   console.log(`   📊 Distance Statistics:`);
-  console.log(`      • Min distance to nearest cluster: ${minDistanceVal.toFixed(2)}`);
-  console.log(`      • Avg distance to nearest cluster: ${avgDistance.toFixed(2)}`);
-  console.log(`      • Max distance to nearest cluster: ${maxDistance.toFixed(2)}`);
-  console.log(`   ✅ Reassigned ${reassigned} outliers to nearby clusters (within threshold)`);
-  console.log(`   📌 Kept as outliers: ${unchanged} notes (beyond distance threshold)\n`);
+  console.log(`      • Min: ${minDistanceVal.toFixed(3)}, Avg: ${avgDistance.toFixed(3)}, Max: ${maxDistanceVal.toFixed(3)}`);
+  console.log(`   💯 Quality Score Statistics (0-1, higher is better):`);
+  console.log(`      • Min: ${minQualityScore.toFixed(3)}, Avg: ${avgQualityScore.toFixed(3)}, Max: ${maxQualityScore.toFixed(3)}`);
+  console.log(`   🎯 Dynamic Threshold: ${dynamicThreshold.toFixed(3)} (average quality score)`);
+  console.log(`   ✅ Reassigned ${reassigned} outliers (quality score > ${dynamicThreshold.toFixed(3)})`);
+  console.log(`   📌 Rejected ${rejected} outliers (quality score ≤ ${dynamicThreshold.toFixed(3)})\n`);
 
-  return updatedLabels;
+  return { updatedLabels, effectiveThreshold: avgDistance };
 };
 
 // Run secondary HDBSCAN clustering on remaining outliers
@@ -365,12 +443,11 @@ const clusterRemainingOutliers = (
 export const clusterNotes = async (
   notesTable: any,
   minClusterSize = 2,
-  verbose = true,
-  distanceThreshold = 2.0
+  verbose = true
 ) => {
   const start = performance.now();
   if (verbose) console.log(`🔬 Starting note clustering...`);
-  if (verbose) console.log(`   Parameters: minClusterSize=${minClusterSize}, distanceThreshold=${distanceThreshold}\n`);
+  if (verbose) console.log(`   Parameters: minClusterSize=${minClusterSize}\n`);
   
   // Step 1: Aggregate chunks to note-level embeddings
   const noteEmbeddings = await aggregateChunksToNotes(notesTable);
@@ -388,8 +465,13 @@ export const clusterNotes = async (
   // Step 3.5: Two-pass refinement
   if (verbose) console.log(`\n🔧 Two-Pass Outlier Refinement:`);
   
-  // Pass 1: Try to assign outliers to existing clusters based on proximity
-  clusterLabels = reassignOutliersToNearestCluster(vectors, clusterLabels, distanceThreshold);
+  // Pass 1: Try to assign outliers to existing clusters based on semantic fit
+  const { updatedLabels: reassignedLabels, effectiveThreshold } = reassignOutliersToNearestCluster(
+    vectors, 
+    clusterLabels, 
+    noteEmbeddings
+  );
+  clusterLabels = reassignedLabels;
   
   // Pass 2: Run secondary HDBSCAN on any remaining isolated outliers
   const remainingOutlierIndices = clusterLabels
