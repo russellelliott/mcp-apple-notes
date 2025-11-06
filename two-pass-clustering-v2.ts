@@ -72,11 +72,12 @@ async function twoPassClusteringV2() {
     const clusterResult = await clusterNotes(notesTable, minClusterSize, true);
     
     console.log(`\n✅ Clustering Results:`);
-    console.log(`   • Primary clusters: ${clusterResult.totalClusters}`);
+    console.log(`   • Primary clusters: ${clusterResult.primaryClusters}`);
+    console.log(`   • Secondary clusters: ${clusterResult.secondaryClusters}`);
+    console.log(`   • Total clusters: ${clusterResult.totalClusters}`);
     console.log(`   • Total notes: ${clusterResult.totalNotes}`);
-    console.log(`   • Notes in primary clusters: ${clusterResult.totalNotes - clusterResult.outliers} (${(((clusterResult.totalNotes - clusterResult.outliers) / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
-    console.log(`   • Secondary clusters created: ${clusterResult.clusterSizes.length - clusterResult.totalClusters}`);
-    console.log(`   • Remaining true outliers: ${clusterResult.outliers} (${((clusterResult.outliers / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`   • Notes in clusters: ${clusterResult.totalNotes - clusterResult.outliers - clusterResult.stillIsolated} (${(((clusterResult.totalNotes - clusterResult.outliers - clusterResult.stillIsolated) / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`   • Remaining true outliers: ${clusterResult.stillIsolated} (${((clusterResult.stillIsolated / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
     console.log(`   • Quality threshold used: ${clusterResult.qualityThreshold.toFixed(3)} (dynamic average)`);
     console.log(`   • Time: ${clusterResult.timeSeconds.toFixed(1)}s\n`);
     
@@ -141,18 +142,18 @@ async function twoPassClusteringV2() {
     
     console.log(`Results:`);
     console.log(`  • Total notes: ${clusterResult.totalNotes}`);
-    console.log(`  • Total clusters (primary + secondary): ${finalRealClusters.length}`);
-    console.log(`  • Primary clusters: ${clusterResult.totalClusters}`);
-    console.log(`  • Secondary clusters: ${finalRealClusters.length - clusterResult.totalClusters}`);
-    console.log(`  • Notes in clusters: ${totalClustered} (${((totalClustered / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
-    console.log(`  • Remaining true outliers: ${outlierCluster.length} (${((outlierCluster.length / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`  • Primary clusters: ${clusterResult.primaryClusters}`);
+    console.log(`  • Secondary clusters: ${clusterResult.secondaryClusters}`);
+    console.log(`  • Total clusters: ${finalRealClusters.length}`);
+    console.log(`  • Notes clustered: ${totalClustered} (${((totalClustered / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
+    console.log(`  • True outliers (size 0): ${clusterResult.stillIsolated} (${((clusterResult.stillIsolated / clusterResult.totalNotes) * 100).toFixed(1)}%)`);
     console.log(`  • Processing time: ${clusterResult.timeSeconds.toFixed(1)}s`);
-    console.log(`  • Quality threshold (semantic fit): ${clusterResult.qualityThreshold.toFixed(3)}`);
+    console.log(`  • Quality threshold: ${clusterResult.qualityThreshold.toFixed(3)} (semantic fit)`);
     
     console.log(`\n✨ Semantic-aware clustering complete!`);
     console.log(`   💾 All changes persisted to database`);
-    console.log(`   🎯 Dynamic threshold: ${clusterResult.qualityThreshold.toFixed(3)} (avg quality score)`);
-    console.log(`   📊 Quality scores: 0-1 scale (0=unrelated, 1=identical)`);
+    console.log(`   🎯 Dynamic threshold: ${clusterResult.qualityThreshold.toFixed(3)} (average quality score)`);
+    console.log(`   📊 ${clusterResult.primaryClusters} primary + ${clusterResult.secondaryClusters} secondary = ${finalRealClusters.length} total clusters`);
     console.log(`   🔄 HDBSCAN throughout (respects variable cluster shapes/densities)`);
     
     if (outlierCluster.length === 0) {

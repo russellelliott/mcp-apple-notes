@@ -398,10 +398,10 @@ const clusterRemainingOutliers = (
   vectors: number[][],
   labels: number[],
   outlierIndices: number[]
-) => {
+): { updatedLabels: number[]; secondaryClustersCount: number; stillOutliers: number } => {
   if (outlierIndices.length === 0) {
     console.log(`   ℹ️ No remaining outliers to cluster`);
-    return labels;
+    return { updatedLabels: labels, secondaryClustersCount: 0, stillOutliers: 0 };
   }
 
   console.log(`   🔬 Running secondary HDBSCAN on ${outlierIndices.length} isolated notes...`);
@@ -437,7 +437,7 @@ const clusterRemainingOutliers = (
   console.log(`   ✅ Created ${secondaryClustersCount} secondary clusters`);
   console.log(`   📌 Still isolated: ${stillOutliers} notes\n`);
 
-  return updatedLabels;
+  return { updatedLabels, secondaryClustersCount, stillOutliers };
 };
 
 // Main clustering function with configurable parameters
@@ -474,13 +474,21 @@ export const clusterNotes = async (
   );
   clusterLabels = reassignedLabels;
   
+  // Count primary clusters before secondary pass
+  const primaryClustersCount = new Set(
+    clusterLabels.filter((label) => label !== -1)
+  ).size;
+  
   // Pass 2: Run secondary HDBSCAN on any remaining isolated outliers
   const remainingOutlierIndices = clusterLabels
     .map((label, idx) => (label === -1 ? idx : -1))
     .filter((idx) => idx !== -1);
   
+  let secondaryClusterStats = { secondaryClustersCount: 0, stillOutliers: 0 };
   if (remainingOutlierIndices.length > 0) {
-    clusterLabels = clusterRemainingOutliers(vectors, clusterLabels, remainingOutlierIndices);
+    const result = clusterRemainingOutliers(vectors, clusterLabels, remainingOutlierIndices);
+    clusterLabels = result.updatedLabels;
+    secondaryClusterStats = { secondaryClustersCount: result.secondaryClustersCount, stillOutliers: result.stillOutliers };
   }
   
   // Step 4: Group notes by cluster
@@ -648,7 +656,10 @@ export const clusterNotes = async (
   
   return {
     totalClusters: validClusters,
+    primaryClusters: primaryClustersCount,
+    secondaryClusters: secondaryClusterStats.secondaryClustersCount,
     outliers,
+    stillIsolated: secondaryClusterStats.stillOutliers,
     totalNotes: noteEmbeddings.length,
     clusterSizes: Array.from(clusters.entries())
       .filter(([id]) => id >= 0)
