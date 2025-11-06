@@ -7,4 +7,4 @@ bun cli.ts --max=200 --mode=fresh
 bun sync-db-cache.ts
 
 # Perform Clustering on the Notes and display them
-bun cluster-and-display.ts
+bun two-pass-clustering-v2.ts
