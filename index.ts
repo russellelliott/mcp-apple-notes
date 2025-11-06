@@ -409,8 +409,9 @@ const clusterRemainingOutliers = (
   // Extract vectors for remaining outliers
   const outlierVectors = outlierIndices.map((idx) => vectors[idx]);
 
-  // Use lower minClusterSize (1) to be more permissive with secondary clusters
-  const hdbscan = new HDBSCAN({ minClusterSize: 1 });
+  // Use minClusterSize: 2 for secondary clustering to avoid singleton clusters
+  // Notes that truly don't cluster together will remain as outliers (-1)
+  const hdbscan = new HDBSCAN({ minClusterSize: 2 });
   const secondaryLabels = hdbscan.fit(outlierVectors);
 
   // Map secondary cluster IDs to new cluster IDs (avoiding conflicts with existing clusters)
