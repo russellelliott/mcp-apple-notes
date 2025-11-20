@@ -1520,45 +1520,74 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   // Step 1: First fetch all titles, creation dates, and modification dates
   console.log('\nStep 1: Fetching note titles, creation dates, and modification dates...');
   
-  const noteTitlesData = await runJxa(`
+  // First get the total count quickly
+  console.log('📊 Getting total note count...');
+  const totalNotesCount = await runJxa(`
     const app = Application('Notes');
-    app.includeStandardAdditions = true;
-    
-    const notes = app.notes();
-    const totalCount = notes.length;
-    const maxNotes = ${maxNotes || 'null'};
-    const limitCount = maxNotes ? Math.min(totalCount, maxNotes) : totalCount;
-    
-    console.log("Found " + totalCount + " notes" + (maxNotes ? ", limiting to " + limitCount : ""));
-    
-    const noteTitles = [];
-    
-    for (let i = 0; i < limitCount; i++) {
-      try {
-        const note = notes[i];
-        noteTitles.push({
-          title: note.name(),
-          creation_date: note.creationDate().toLocaleString(),
-          modification_date: note.modificationDate().toLocaleString()
-        });
-        
-        if ((i + 1) % 100 === 0) {
-          console.log("Fetched titles: " + (i + 1) + "/" + limitCount);
-        }
-      } catch (error) {
-        console.log("Error at index " + i + ": " + error.toString());
-      }
-    }
-    
-    return JSON.stringify(noteTitles);
-  `);
+    return app.notes().length;
+  `) as number;
   
-  const noteTitles = JSON.parse(noteTitlesData as string) as Array<{
+  const limitCount = maxNotes ? Math.min(totalNotesCount, maxNotes) : totalNotesCount;
+  console.log(`📋 Found ${totalNotesCount} notes${maxNotes ? `, limiting to ${limitCount}` : ''}`);
+  
+  // Process notes in batches with progress updates
+  const TITLE_BATCH_SIZE = 50;
+  const allNoteTitles: Array<{
     title: string;
     creation_date: string;
     modification_date: string;
-  }>;
-  console.log(`Fetched ${noteTitles.length} note titles in ${((performance.now() - start)/1000).toFixed(1)}s`);
+  }> = [];
+  
+  let titleProgress = 0;
+  const totalTitleBatches = Math.ceil(limitCount / TITLE_BATCH_SIZE);
+  
+  console.log(`🔄 Processing titles in ${totalTitleBatches} batches of ${TITLE_BATCH_SIZE}...`);
+  
+  for (let batchStart = 0; batchStart < limitCount; batchStart += TITLE_BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + TITLE_BATCH_SIZE, limitCount);
+    const batchNum = Math.floor(batchStart / TITLE_BATCH_SIZE) + 1;
+    
+    console.log(`📦 [${batchNum}/${totalTitleBatches}] Fetching titles ${batchStart + 1}-${batchEnd}...`);
+    
+    const batchTitlesData = await runJxa(`
+      const app = Application('Notes');
+      const notes = app.notes();
+      const startIdx = ${batchStart};
+      const endIdx = ${batchEnd};
+      const noteTitles = [];
+      
+      for (let i = startIdx; i < endIdx; i++) {
+        try {
+          const note = notes[i];
+          noteTitles.push({
+            title: note.name(),
+            creation_date: note.creationDate().toLocaleString(),
+            modification_date: note.modificationDate().toLocaleString()
+          });
+        } catch (error) {
+          // Skip problematic notes
+          continue;
+        }
+      }
+      
+      return JSON.stringify(noteTitles);
+    `);
+    
+    const batchTitles = JSON.parse(batchTitlesData as string) as Array<{
+      title: string;
+      creation_date: string;
+      modification_date: string;
+    }>;
+    
+    allNoteTitles.push(...batchTitles);
+    titleProgress = batchEnd;
+    
+    console.log(`✅ [${batchNum}/${totalTitleBatches}] Got ${batchTitles.length} titles (${titleProgress}/${limitCount} total)`);
+  }
+  
+  console.log(`✨ Fetched ${allNoteTitles.length} note titles in ${((performance.now() - start)/1000).toFixed(1)}s`);
+  
+  const noteTitles = allNoteTitles;
   
   // Step 2: Determine which notes to process based on mode
   let notesToProcess: NoteMetadata[] = noteTitles;
@@ -1752,6 +1781,11 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   console.log(`\nStep 5: Adding ${allChunks.length} chunks to database...`);
   console.log(`💡 Using batch size of ${DB_BATCH_SIZE} chunks per database write for optimal performance.`);
   
+  // Get initial row count for incremental verification
+  const initialRowCount = await notesTable.countRows();
+  const expectedFinalCount = initialRowCount + allChunks.length;
+  console.log(`📊 Initial database rows: ${initialRowCount}, expecting ${expectedFinalCount} after adding ${allChunks.length} new chunks`);
+  
   const totalBatches = Math.ceil(allChunks.length / DB_BATCH_SIZE);
   let totalWritten = 0;
   
@@ -1782,18 +1816,21 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
     }
   }
   
-  // Final verification
+  // Final verification - check if database grew by expected amount
   const finalRowCount = await notesTable.countRows();
-  console.log(`\n🔍 Final verification: Database has ${finalRowCount} rows (expected ${allChunks.length})`);
+  console.log(`\n🔍 Final verification: Database has ${finalRowCount} rows`);
+  console.log(`📊 Expected: ${expectedFinalCount} rows (${initialRowCount} initial + ${allChunks.length} new)`);
   
-  if (finalRowCount !== allChunks.length) {
+  if (finalRowCount !== expectedFinalCount) {
     console.error(`❌ DATABASE WRITE VERIFICATION FAILED!`);
-    console.error(`   Expected: ${allChunks.length} chunks`);
-    console.error(`   Actual: ${finalRowCount} chunks`);
-    console.error(`   Missing: ${allChunks.length - finalRowCount} chunks`);
-    throw new Error(`Database write verification failed: ${finalRowCount}/${allChunks.length} chunks persisted`);
+    console.error(`   Initial rows: ${initialRowCount}`);
+    console.error(`   New chunks added: ${allChunks.length}`);
+    console.error(`   Expected final: ${expectedFinalCount}`);
+    console.error(`   Actual final: ${finalRowCount}`);
+    console.error(`   Difference: ${finalRowCount - expectedFinalCount} chunks`);
+    throw new Error(`Database write verification failed: ${finalRowCount}/${expectedFinalCount} total chunks (expected growth of ${allChunks.length})`);
   } else {
-    console.log(`✅ Database write verification successful: All ${finalRowCount} chunks persisted`);
+    console.log(`✅ Database write verification successful: Added ${allChunks.length} chunks, total now ${finalRowCount}`);
   }
   
   // Step 6: Save updated cache
