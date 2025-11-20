@@ -1683,19 +1683,22 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
     console.log(`\nStep 2: Fresh mode - processing all ${noteTitles.length} notes`);
   }
   
-  // Step 3: Fetch content for notes that need processing
-  console.log(`\nStep 3: Fetching full note content for ${notesToProcess.length} notes...`);
+  // Step 3: Process notes in batches - fetch, chunk, and immediately write to database
+  console.log(`\nStep 3: Processing ${notesToProcess.length} notes in memory-efficient batches...`);
+  console.log(`💡 Each batch will be: fetched → chunked → written to database immediately`);
+  console.log(`📈 This approach minimizes memory usage by not storing all notes/chunks in memory at once\n`);
   
-  const allNotes: Array<{
-    title: string;
-    content: string;
-    creation_date: string;
-    modification_date: string;
-  }> = [];
-  
-  let fetchProgress = 0;
+  let totalChunks = 0;
+  let totalProcessed = 0;
+  let totalFailed = 0;
   const batchSize = 50; // Process in batches for better performance
+  const DB_BATCH_SIZE = 100; // Chunks per database write
   
+  // Get initial row count for verification
+  const initialRowCount = await notesTable.countRows();
+  console.log(`📊 Initial database rows: ${initialRowCount}`);
+  
+  // Process each batch independently to minimize memory usage
   for (let i = 0; i < notesToProcess.length; i += batchSize) {
     const batch = notesToProcess.slice(i, i + batchSize);
     const batchNum = Math.floor(i / batchSize) + 1;
@@ -1703,16 +1706,15 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
     
     console.log(`\n📦 Processing batch ${batchNum}/${totalBatches} (${batch.length} notes):`);
     
-    // Fetch batch in parallel
+    // Step 3a: Fetch batch content in parallel
+    console.log(`   📥 Fetching content for batch ${batchNum}...`);
     const batchResults = await Promise.all(
       batch.map(async ({ title, creation_date, modification_date }, index) => {
         try {
-          console.log(`   📄 [${batchNum}.${index + 1}] Fetching: "${title}"`);
-          console.log(`       Created: ${creation_date}`);
-          console.log(`       Modified: ${modification_date}`);
+          console.log(`     📄 [${batchNum}.${index + 1}] Fetching: "${title}"`);
           const result = await getNoteByTitleAndDate(title, creation_date);
           if (result) {
-            console.log(`   ✅ [${batchNum}.${index + 1}] Success: "${title}"`);
+            console.log(`     ✅ [${batchNum}.${index + 1}] Success: "${title}"`);
             return {
               title: result.title,
               content: result.content,
@@ -1720,158 +1722,139 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
               modification_date: modification_date // Use the fresh modification date
             };
           } else {
-            console.log(`   ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}"`);
+            console.log(`     ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}"`);
           }
           return null;
         } catch (error) {
-          console.log(`   ❌ [${batchNum}.${index + 1}] Failed: "${title}" - ${(error as Error).message}`);
+          console.log(`     ❌ [${batchNum}.${index + 1}] Failed: "${title}" - ${(error as Error).message}`);
           return null;
         }
       })
     );
     
-    // Add successful fetches to allNotes
-    batchResults.forEach(note => {
-      if (note) {
-        allNotes.push(note);
-      }
-    });
+    const successfulNotes = batchResults.filter(note => note !== null);
+    console.log(`   📊 Fetched: ${successfulNotes.length}/${batch.length} notes successfully`);
     
-    fetchProgress += batch.length;
-    console.log(`📊 Batch ${batchNum} complete: ${batchResults.filter(r => r !== null).length}/${batch.length} successful`);
+    // Step 3b: Process batch into chunks
+    console.log(`   ✂️ Processing ${successfulNotes.length} notes into chunks...`);
+    const batchChunks: ChunkData[] = [];
+    let batchProcessed = 0;
+    let batchFailed = 0;
     
-    if (fetchProgress % 100 === 0 || fetchProgress === notesToProcess.length) {
-      console.log(`🎯 Overall progress: ${fetchProgress}/${notesToProcess.length} notes processed`);
-    }
-  }
-  
-  console.log(`Fetched ${allNotes.length} complete notes in ${((performance.now() - start)/1000).toFixed(1)}s`);
-  
-  // Step 4: Process into chunks and add to database
-  console.log(`\nStep 4: Processing notes into chunks...`);
-  
-  let totalChunks = 0;
-  let processed = 0;
-  let failed = 0;
-  const allChunks: ChunkData[] = [];
-  
-  for (const note of allNotes) {
-    try {
-      console.log(`📝 [${processed + 1}/${allNotes.length}] Chunking: "${note.title}"`);
-      
-      const plainText = htmlToPlainText(note.content || "");
-      const fullText = `${note.title}\n\n${plainText}`;
-      const chunks = await createChunks(fullText);
-      
-      console.log(`   ✂️ Created ${chunks.length} chunk${chunks.length === 1 ? '' : 's'} for "${note.title}"`);
-      
-      chunks.forEach((chunkContent, index) => {
-        allChunks.push({
-          title: note.title,
-          content: plainText,
-          creation_date: note.creation_date,
-          modification_date: note.modification_date,
-          chunk_index: index.toString(),
-          total_chunks: chunks.length.toString(),
-          chunk_content: chunkContent,
-          // Initialize cluster fields as empty - will be populated when clustering is run
-          cluster_id: "",
-          cluster_label: "",
-          cluster_confidence: "",
-          cluster_summary: "",
-          last_clustered: "",
+    for (const note of successfulNotes) {
+      try {
+        const plainText = htmlToPlainText(note.content || "");
+        const fullText = `${note.title}\n\n${plainText}`;
+        const chunks = await createChunks(fullText);
+        
+        chunks.forEach((chunkContent, index) => {
+          batchChunks.push({
+            title: note.title,
+            content: plainText,
+            creation_date: note.creation_date,
+            modification_date: note.modification_date,
+            chunk_index: index.toString(),
+            total_chunks: chunks.length.toString(),
+            chunk_content: chunkContent,
+            // Initialize cluster fields as empty - will be populated when clustering is run
+            cluster_id: "",
+            cluster_label: "",
+            cluster_confidence: "",
+            cluster_summary: "",
+            last_clustered: "",
+          });
         });
-      });
-      
-      totalChunks += chunks.length;
-      processed++;
-      
-      if (processed % 5 === 0 || processed === allNotes.length) {
-        console.log(`📊 Chunking progress: ${processed}/${allNotes.length} notes → ${totalChunks} total chunks`);
+        
+        batchProcessed++;
+        console.log(`     📝 [${batchProcessed}/${successfulNotes.length}] "${note.title}" → ${chunks.length} chunks`);
+        
+      } catch (error) {
+        batchFailed++;
+        console.log(`     ❌ [${batchProcessed + batchFailed}/${successfulNotes.length}] Failed to chunk "${note.title}": ${(error as Error).message}`);
       }
-    } catch (error) {
-      failed++;
-      console.log(`❌ [${processed + 1}/${allNotes.length}] Failed to chunk "${note.title}": ${(error as Error).message}`);
     }
-  }
-  
-  // Step 5: Add to database in batches
-  const DB_BATCH_SIZE = 100;
-  
-  console.log(`\nStep 5: Adding ${allChunks.length} chunks to database...`);
-  console.log(`💡 Using batch size of ${DB_BATCH_SIZE} chunks per database write for optimal performance.`);
-  
-  // Get initial row count for incremental verification
-  const initialRowCount = await notesTable.countRows();
-  const expectedFinalCount = initialRowCount + allChunks.length;
-  console.log(`📊 Initial database rows: ${initialRowCount}, expecting ${expectedFinalCount} after adding ${allChunks.length} new chunks`);
-  
-  const totalBatches = Math.ceil(allChunks.length / DB_BATCH_SIZE);
-  let totalWritten = 0;
-  
-  for (let i = 0; i < allChunks.length; i += DB_BATCH_SIZE) {
-    const batch = allChunks.slice(i, i + DB_BATCH_SIZE);
-    const batchNum = Math.floor(i / DB_BATCH_SIZE) + 1;
     
-    console.log(`💾 [${batchNum}/${totalBatches}] Writing batch of ${batch.length} chunks to database...`);
+    console.log(`   📊 Batch ${batchNum} chunks: ${batchChunks.length} total from ${batchProcessed} notes`);
     
-    try {
-      await notesTable.add(batch);
+    // Step 3c: Write batch chunks to database immediately
+    if (batchChunks.length > 0) {
+      console.log(`   💾 Writing ${batchChunks.length} chunks to database...`);
       
-      // Verify the write by counting rows immediately after
+      // Write chunks in sub-batches for optimal database performance
+      const chunkBatches = Math.ceil(batchChunks.length / DB_BATCH_SIZE);
+      for (let j = 0; j < batchChunks.length; j += DB_BATCH_SIZE) {
+        const chunkBatch = batchChunks.slice(j, j + DB_BATCH_SIZE);
+        const chunkBatchNum = Math.floor(j / DB_BATCH_SIZE) + 1;
+        
+        try {
+          await notesTable.add(chunkBatch);
+          console.log(`     ✅ [${chunkBatchNum}/${chunkBatches}] Wrote ${chunkBatch.length} chunks to database`);
+        } catch (error) {
+          console.error(`     ❌ [${chunkBatchNum}/${chunkBatches}] Failed to write chunk batch:`, error);
+          throw error;
+        }
+      }
+      
+      // Verify database write
       const currentRowCount = await notesTable.countRows();
-      console.log(`🔍 [${batchNum}/${totalBatches}] Database now has ${currentRowCount} total rows`);
-      
-      totalWritten += batch.length;
-      const progress = Math.min(i + DB_BATCH_SIZE, allChunks.length);
-      console.log(`✅ [${batchNum}/${totalBatches}] Written ${progress}/${allChunks.length} chunks`);
-      
-    } catch (error) {
-      console.error(`❌ [${batchNum}/${totalBatches}] Failed to write batch:`, error);
-      throw error; // Re-throw to stop the process
+      console.log(`   🔍 Database now has ${currentRowCount} total rows (+${batchChunks.length} from this batch)`);
     }
     
-    if ((i + DB_BATCH_SIZE) % 1000 === 0) {
-      console.log(`🎯 Major checkpoint: ${i + DB_BATCH_SIZE}/${allChunks.length} chunks written to database`);
-    }
+    // Update totals
+    totalChunks += batchChunks.length;
+    totalProcessed += batchProcessed;
+    totalFailed += batchFailed;
+    
+    console.log(`✅ Batch ${batchNum}/${totalBatches} complete: ${batchProcessed} notes → ${batchChunks.length} chunks written to database`);
+    console.log(`📊 Overall progress: ${totalProcessed}/${notesToProcess.length} notes processed, ${totalChunks} total chunks`);
+    
+    // Clear batch data from memory before next iteration
+    // (This happens automatically with block scope, but being explicit)
   }
   
   // Final verification - check if database grew by expected amount
   const finalRowCount = await notesTable.countRows();
+  const expectedFinalCount = initialRowCount + totalChunks;
   console.log(`\n🔍 Final verification: Database has ${finalRowCount} rows`);
-  console.log(`📊 Expected: ${expectedFinalCount} rows (${initialRowCount} initial + ${allChunks.length} new)`);
+  console.log(`📊 Expected: ${expectedFinalCount} rows (${initialRowCount} initial + ${totalChunks} new)`);
   
   if (finalRowCount !== expectedFinalCount) {
     console.error(`❌ DATABASE WRITE VERIFICATION FAILED!`);
     console.error(`   Initial rows: ${initialRowCount}`);
-    console.error(`   New chunks added: ${allChunks.length}`);
+    console.error(`   New chunks added: ${totalChunks}`);
     console.error(`   Expected final: ${expectedFinalCount}`);
     console.error(`   Actual final: ${finalRowCount}`);
     console.error(`   Difference: ${finalRowCount - expectedFinalCount} chunks`);
-    throw new Error(`Database write verification failed: ${finalRowCount}/${expectedFinalCount} total chunks (expected growth of ${allChunks.length})`);
+    throw new Error(`Database write verification failed: ${finalRowCount}/${expectedFinalCount} total chunks (expected growth of ${totalChunks})`);
   } else {
-    console.log(`✅ Database write verification successful: Added ${allChunks.length} chunks, total now ${finalRowCount}`);
+    console.log(`✅ Database write verification successful: Added ${totalChunks} chunks, total now ${finalRowCount}`);
   }
   
-  // Step 6: Save updated cache
-  console.log(`\nStep 6: Updating notes cache...`);
+  // Step 4: Save updated cache
+  console.log(`\nStep 4: Updating notes cache...`);
   await saveNotesCache(noteTitles);
   
   const totalTime = (performance.now() - start) / 1000;
   
-  console.log(`\n✨ Complete! ${processed} notes → ${totalChunks} chunks in ${totalTime.toFixed(1)}s`);
+  console.log(`\n✨ Complete! ${totalProcessed} notes → ${totalChunks} chunks in ${totalTime.toFixed(1)}s`);
   if (skippedCount > 0) {
     console.log(`⏩ Skipped ${skippedCount} unchanged notes (incremental mode)`);
   }
   
-  return { processed, totalChunks, failed, skipped: skippedCount, timeSeconds: totalTime };
+  return { 
+    processed: totalProcessed, 
+    totalChunks, 
+    failed: totalFailed, 
+    skipped: skippedCount, 
+    timeSeconds: totalTime 
+  };
 };
 
 // Helper function to create FTS index on chunk_content
 const createFTSIndex = async (notesTable: any) => {
   try {
     const indices = await notesTable.listIndices();
-    if (!indices.find((index) => index.name === "chunk_content_idx")) {
+    if (!indices.find((index: any) => index.name === "chunk_content_idx")) {
       await notesTable.createIndex("chunk_content", {
         config: lancedb.Index.fts(),
         replace: true,
@@ -1879,7 +1862,7 @@ const createFTSIndex = async (notesTable: any) => {
       console.log(`✅ Created FTS index on chunk_content`);
     }
   } catch (error) {
-    console.log(`⚠️ FTS index creation failed: ${error.message}`);
+    console.log(`⚠️ FTS index creation failed: ${(error as Error).message}`);
   }
 };
 
@@ -1976,7 +1959,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, c) => {
 
         return createTextResponse(`${JSON.stringify(note, null, 2)}`);
       } catch (error) {
-        return createTextResponse(error.message);
+        return createTextResponse((error as Error).message);
       }
     } else if (name === "index-notes") {
       // Use the enhanced method by default for better reliability
@@ -2184,7 +2167,7 @@ export const searchAndCombineResults = async (
       console.log(`📋 Unique notes from vector search: ${noteResults.size}`);
     }
   } catch (error) {
-    console.log(`❌ Vector Error: ${error.message}`);
+    console.log(`❌ Vector Error: ${(error as Error).message}`);
   }
   
   // Strategy 2: FTS search on chunk content
@@ -2197,7 +2180,7 @@ export const searchAndCombineResults = async (
     try {
       queryEmbedding = await func.computeQueryEmbeddings(query);
     } catch (e) {
-      console.log(`⚠️ Could not compute query embedding for FTS scoring: ${e.message}`);
+      console.log(`⚠️ Could not compute query embedding for FTS scoring: ${(e as Error).message}`);
     }
 
     // Helper to compute cosine similarity
@@ -2235,7 +2218,7 @@ export const searchAndCombineResults = async (
 
     console.log(`📝 FTS results: ${ftsResults.length} chunks`);
   } catch (error) {
-    console.log(`❌ FTS Error: ${error.message}`);
+    console.log(`❌ FTS Error: ${(error as Error).message}`);
   }
   
   // Strategy 3: Database-level exact phrase matching (much more efficient)
@@ -2277,7 +2260,7 @@ export const searchAndCombineResults = async (
       });
     }
   } catch (error) {
-    console.log(`❌ Database search error: ${error.message}`);
+    console.log(`❌ Database search error: ${(error as Error).message}`);
     // Fallback: try a simpler approach
     console.log(`🔄 Trying fallback search...`);
     try {
@@ -2312,7 +2295,7 @@ export const searchAndCombineResults = async (
         }
       });
     } catch (fallbackError) {
-      console.log(`❌ Fallback also failed: ${fallbackError.message}`);
+      console.log(`❌ Fallback also failed: ${(fallbackError as Error).message}`);
     }
   }
   
