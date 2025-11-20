@@ -1603,10 +1603,30 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       
       const { newNotes, modifiedNotes, unchangedNotes } = identifyChangedNotes(noteTitles, cachedNotes.notes);
       
+      // Filter out suspicious backwards date changes
+      const suspiciousChanges = modifiedNotes.filter(note => {
+        const cached = cachedNotes.notes.find(c => c.title === note.title);
+        if (cached) {
+          const cachedDate = new Date(cached.modification_date);
+          const currentDate = new Date(note.modification_date);
+          return currentDate < cachedDate; // Current date is older than cached
+        }
+        return false;
+      });
+      
+      if (suspiciousChanges.length > 0) {
+        console.log(`⚠️ Detected ${suspiciousChanges.length} notes with backwards date changes (likely Apple Notes sync issues)`);
+        console.log(`   These will be treated as unchanged to avoid unnecessary reprocessing.`);
+      }
+      
+      // Remove suspicious changes from modifiedNotes and add to unchangedNotes
+      const validModifiedNotes = modifiedNotes.filter(note => !suspiciousChanges.includes(note));
+      const adjustedUnchangedNotes = [...unchangedNotes, ...suspiciousChanges];
+      
       console.log(`📊 Change analysis:`);
       console.log(`  • New notes: ${newNotes.length}`);
-      console.log(`  • Modified notes: ${modifiedNotes.length}`);
-      console.log(`  • Unchanged notes: ${unchangedNotes.length}`);
+      console.log(`  • Modified notes: ${validModifiedNotes.length}${suspiciousChanges.length > 0 ? ` (filtered out ${suspiciousChanges.length} suspicious)` : ''}`);
+      console.log(`  • Unchanged notes: ${adjustedUnchangedNotes.length}`);
       
       // Show details of new notes
       if (newNotes.length > 0) {
@@ -1620,21 +1640,21 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       }
       
       // Show details of modified notes
-      if (modifiedNotes.length > 0) {
+      if (validModifiedNotes.length > 0) {
         console.log(`\n✏️ Modified notes detected:`);
-        modifiedNotes.slice(0, 10).forEach((note, idx) => {
+        validModifiedNotes.slice(0, 10).forEach((note, idx) => {
           const cached = cachedNotes.notes.find(c => c.title === note.title);
           console.log(`  ${idx + 1}. "${note.title}"`);
           console.log(`      Created: ${note.creation_date}`);
           console.log(`      Modified: ${cached?.modification_date} → ${note.modification_date}`);
         });
-        if (modifiedNotes.length > 10) {
-          console.log(`  ... and ${modifiedNotes.length - 10} more modified notes`);
+        if (validModifiedNotes.length > 10) {
+          console.log(`  ... and ${validModifiedNotes.length - 10} more modified notes`);
         }
       }
       
-      notesToProcess = [...newNotes, ...modifiedNotes];
-      skippedCount = unchangedNotes.length;
+      notesToProcess = [...newNotes, ...validModifiedNotes];
+      skippedCount = adjustedUnchangedNotes.length;
       
       if (notesToProcess.length === 0) {
         console.log(`✨ No changes detected! All notes are up to date.`);
@@ -1644,9 +1664,9 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       }
       
       // Remove old chunks for modified notes from database
-      if (modifiedNotes.length > 0) {
-        console.log(`\n🗑️ Removing old chunks for ${modifiedNotes.length} modified notes...`);
-        for (const modNote of modifiedNotes) {
+      if (validModifiedNotes.length > 0) {
+        console.log(`\n🗑️ Removing old chunks for ${validModifiedNotes.length} modified notes...`);
+        for (const modNote of validModifiedNotes) {
           try {
             // Delete existing chunks for this note
             await notesTable.delete(`title = '${modNote.title.replace(/'/g, "''")}'`);
