@@ -1436,12 +1436,23 @@ const getNoteDetailsByTitle = async (title: string, creationDate?: string) => {
 };
 
 // New helper function to get note by title AND creation date
-const getNoteByTitleAndDate = async (title: string, creationDate: string) => {
+const getNoteByTitleAndDate = async (title: string, creationDate: string, customTimeout?: number) => {
+  const NOTE_FETCH_TIMEOUT = customTimeout || 300000; // Default 5 minutes per note
+  
   // Escape special characters in title and date
   const escapedTitle = title.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const escapedDate = creationDate.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   
-  const note = await runJxa(`
+  // Add timeout to prevent hanging on problematic notes
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    console.log(`⏰ Timeout: Note "${title}" is taking too long (>${NOTE_FETCH_TIMEOUT/1000}s), skipping...`);
+    controller.abort();
+  }, NOTE_FETCH_TIMEOUT);
+  
+  try {
+    const note = await Promise.race([
+      runJxa(`
     const app = Application('Notes');
     const targetTitle = "${escapedTitle}";
     const targetDate = "${escapedDate}";
@@ -1494,21 +1505,42 @@ const getNoteByTitleAndDate = async (title: string, creationDate: string) => {
       console.log("Error fetching note: " + error.toString());
       return "{}";
     }
-  `);
+  `),
+      new Promise((_, reject) => {
+        controller.signal.addEventListener('abort', () =>
+          reject(new Error(`Note fetch timeout after ${NOTE_FETCH_TIMEOUT/1000} seconds: "${title}"`))
+        );
+      })
+    ]);
 
-  const parsed = JSON.parse(note as string);
-  
-  // Return null if empty object (note not found)
-  if (Object.keys(parsed).length === 0) {
+    clearTimeout(timeout);
+    const parsed = JSON.parse(note as string);
+    
+    // Return null if empty object (note not found)
+    if (Object.keys(parsed).length === 0) {
+      return null;
+    }
+    
+    return parsed as {
+      title: string;
+      content: string;
+      creation_date: string;
+      modification_date: string;
+    };
+    
+  } catch (error) {
+    clearTimeout(timeout);
+    
+    // Check if it was a timeout error
+    if ((error as Error).message.includes('timeout')) {
+      console.log(`⏰ Skipped note "${title}" due to timeout (>5min)`);
+      return null;
+    }
+    
+    // Other errors
+    console.log(`❌ Error fetching note "${title}": ${(error as Error).message}`);
     return null;
   }
-  
-  return parsed as {
-    title: string;
-    content: string;
-    creation_date: string;
-    modification_date: string;
-  };
 };
 
 // Enhanced fetchAndIndexAllNotes function that fetches by title and creation date
@@ -1603,30 +1635,10 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       
       const { newNotes, modifiedNotes, unchangedNotes } = identifyChangedNotes(noteTitles, cachedNotes.notes);
       
-      // Filter out suspicious backwards date changes
-      const suspiciousChanges = modifiedNotes.filter(note => {
-        const cached = cachedNotes.notes.find(c => c.title === note.title);
-        if (cached) {
-          const cachedDate = new Date(cached.modification_date);
-          const currentDate = new Date(note.modification_date);
-          return currentDate < cachedDate; // Current date is older than cached
-        }
-        return false;
-      });
-      
-      if (suspiciousChanges.length > 0) {
-        console.log(`⚠️ Detected ${suspiciousChanges.length} notes with backwards date changes (likely Apple Notes sync issues)`);
-        console.log(`   These will be treated as unchanged to avoid unnecessary reprocessing.`);
-      }
-      
-      // Remove suspicious changes from modifiedNotes and add to unchangedNotes
-      const validModifiedNotes = modifiedNotes.filter(note => !suspiciousChanges.includes(note));
-      const adjustedUnchangedNotes = [...unchangedNotes, ...suspiciousChanges];
-      
       console.log(`📊 Change analysis:`);
       console.log(`  • New notes: ${newNotes.length}`);
-      console.log(`  • Modified notes: ${validModifiedNotes.length}${suspiciousChanges.length > 0 ? ` (filtered out ${suspiciousChanges.length} suspicious)` : ''}`);
-      console.log(`  • Unchanged notes: ${adjustedUnchangedNotes.length}`);
+      console.log(`  • Modified notes: ${modifiedNotes.length}`);
+      console.log(`  • Unchanged notes: ${unchangedNotes.length}`);
       
       // Show details of new notes
       if (newNotes.length > 0) {
@@ -1640,21 +1652,21 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       }
       
       // Show details of modified notes
-      if (validModifiedNotes.length > 0) {
+      if (modifiedNotes.length > 0) {
         console.log(`\n✏️ Modified notes detected:`);
-        validModifiedNotes.slice(0, 10).forEach((note, idx) => {
+        modifiedNotes.slice(0, 10).forEach((note, idx) => {
           const cached = cachedNotes.notes.find(c => c.title === note.title);
           console.log(`  ${idx + 1}. "${note.title}"`);
           console.log(`      Created: ${note.creation_date}`);
           console.log(`      Modified: ${cached?.modification_date} → ${note.modification_date}`);
         });
-        if (validModifiedNotes.length > 10) {
-          console.log(`  ... and ${validModifiedNotes.length - 10} more modified notes`);
+        if (modifiedNotes.length > 10) {
+          console.log(`  ... and ${modifiedNotes.length - 10} more modified notes`);
         }
       }
       
-      notesToProcess = [...newNotes, ...validModifiedNotes];
-      skippedCount = adjustedUnchangedNotes.length;
+      notesToProcess = [...newNotes, ...modifiedNotes];
+      skippedCount = unchangedNotes.length;
       
       if (notesToProcess.length === 0) {
         console.log(`✨ No changes detected! All notes are up to date.`);
@@ -1664,9 +1676,9 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       }
       
       // Remove old chunks for modified notes from database
-      if (validModifiedNotes.length > 0) {
-        console.log(`\n🗑️ Removing old chunks for ${validModifiedNotes.length} modified notes...`);
-        for (const modNote of validModifiedNotes) {
+      if (modifiedNotes.length > 0) {
+        console.log(`\n🗑️ Removing old chunks for ${modifiedNotes.length} modified notes...`);
+        for (const modNote of modifiedNotes) {
           try {
             // Delete existing chunks for this note
             await notesTable.delete(`title = '${modNote.title.replace(/'/g, "''")}'`);
@@ -1691,8 +1703,18 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   let totalChunks = 0;
   let totalProcessed = 0;
   let totalFailed = 0;
+  let totalTimeouts = 0;
+  let totalRetries = 0;
   const batchSize = 50; // Process in batches for better performance
   const DB_BATCH_SIZE = 100; // Chunks per database write
+  
+  // Track notes that timed out for retry later
+  const timedOutNotes: Array<{
+    title: string;
+    creation_date: string;
+    modification_date: string;
+    attempt: number;
+  }> = [];
   
   // Get initial row count for verification
   const initialRowCount = await notesTable.countRows();
@@ -1707,26 +1729,42 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
     console.log(`\n📦 Processing batch ${batchNum}/${totalBatches} (${batch.length} notes):`);
     
     // Step 3a: Fetch batch content in parallel
-    console.log(`   📥 Fetching content for batch ${batchNum}...`);
+    console.log(`   📥 Fetching content for batch ${batchNum}... (timeout: 5min per note)`);
     const batchResults = await Promise.all(
       batch.map(async ({ title, creation_date, modification_date }, index) => {
         try {
           console.log(`     📄 [${batchNum}.${index + 1}] Fetching: "${title}"`);
+          const start = performance.now();
           const result = await getNoteByTitleAndDate(title, creation_date);
+          const duration = (performance.now() - start) / 1000;
+          
           if (result) {
-            console.log(`     ✅ [${batchNum}.${index + 1}] Success: "${title}"`);
+            console.log(`     ✅ [${batchNum}.${index + 1}] Success: "${title}" (${duration.toFixed(1)}s)`);
             return {
               title: result.title,
               content: result.content,
               creation_date: result.creation_date,
-              modification_date: modification_date // Use the fresh modification date
+              modification_date: modification_date, // Use the fresh modification date
+              _fetchDuration: duration
             };
           } else {
-            console.log(`     ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}"`);
+            console.log(`     ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}" (${duration.toFixed(1)}s)`);
           }
           return null;
         } catch (error) {
-          console.log(`     ❌ [${batchNum}.${index + 1}] Failed: "${title}" - ${(error as Error).message}`);
+          const errorMsg = (error as Error).message;
+          if (errorMsg.includes('timeout')) {
+            console.log(`     ⏰ [${batchNum}.${index + 1}] Timeout: "${title}" (will retry later with longer timeout after 5min)`);
+            timedOutNotes.push({
+              title,
+              creation_date,
+              modification_date,
+              attempt: 1
+            });
+            totalTimeouts++;
+          } else {
+            console.log(`     ❌ [${batchNum}.${index + 1}] Failed: "${title}" - ${errorMsg}`);
+          }
           return null;
         }
       })
@@ -1808,8 +1846,143 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
     console.log(`✅ Batch ${batchNum}/${totalBatches} complete: ${batchProcessed} notes → ${batchChunks.length} chunks written to database`);
     console.log(`📊 Overall progress: ${totalProcessed}/${notesToProcess.length} notes processed, ${totalChunks} total chunks`);
     
+    // Progressive cache saving - save cache after every few batches to avoid losing progress
+    if (batchNum % 5 === 0 || batchNum === totalBatches) {
+      console.log(`   💾 Saving progress to cache (batch ${batchNum}/${totalBatches})...`);
+      try {
+        await saveNotesCache(allNoteTitles);
+        console.log(`   ✅ Cache updated successfully`);
+      } catch (error) {
+        console.log(`   ⚠️ Cache save failed: ${(error as Error).message}`);
+      }
+    }
+    
     // Clear batch data from memory before next iteration
     // (This happens automatically with block scope, but being explicit)
+  }
+  
+  // Step 3d: Retry timed-out notes with progressively longer timeouts
+  if (timedOutNotes.length > 0) {
+    console.log(`\n🔄 Retrying ${timedOutNotes.length} timed-out notes with longer timeouts...`);
+    
+    const maxRetries = 2; // Try up to 2 additional times
+    const timeoutMultipliers = [1.5, 2]; // 7.5min, then 10min
+    
+    for (let retryRound = 0; retryRound < maxRetries && timedOutNotes.length > 0; retryRound++) {
+      const currentTimeout = 300000 * timeoutMultipliers[retryRound];
+      console.log(`\n🕐 Retry round ${retryRound + 1}/${maxRetries}: ${timedOutNotes.length} notes with ${currentTimeout/1000}s timeout`);
+      
+      const retryResults = [];
+      const stillTimedOut = [];
+      
+      // Process retries one at a time to avoid overwhelming the system
+      for (let i = 0; i < timedOutNotes.length; i++) {
+        const note = timedOutNotes[i];
+        console.log(`   🔄 [${i + 1}/${timedOutNotes.length}] Retry "${note.title}" (${currentTimeout/1000}s timeout)`);
+        
+        try {
+          const start = performance.now();
+          const result = await getNoteByTitleAndDate(note.title, note.creation_date, currentTimeout);
+          const duration = (performance.now() - start) / 1000;
+          
+          if (result) {
+            console.log(`   ✅ [${i + 1}/${timedOutNotes.length}] Retry success: "${note.title}" (${duration.toFixed(1)}s)`);
+            retryResults.push({
+              title: result.title,
+              content: result.content,
+              creation_date: result.creation_date,
+              modification_date: note.modification_date,
+              _fetchDuration: duration,
+              _wasRetry: true
+            });
+            totalRetries++;
+          } else {
+            console.log(`   ⚠️ [${i + 1}/${timedOutNotes.length}] Retry empty result: "${note.title}" (${duration.toFixed(1)}s)`);
+          }
+        } catch (error) {
+          const errorMsg = (error as Error).message;
+          if (errorMsg.includes('timeout')) {
+            console.log(`   ⏰ [${i + 1}/${timedOutNotes.length}] Retry timeout: "${note.title}" (still too slow)`);
+            stillTimedOut.push({ ...note, attempt: note.attempt + 1 });
+          } else {
+            console.log(`   ❌ [${i + 1}/${timedOutNotes.length}] Retry failed: "${note.title}" - ${errorMsg}`);
+          }
+        }
+      }
+      
+      // Process successful retries into chunks and write to database
+      if (retryResults.length > 0) {
+        console.log(`   ✂️ Processing ${retryResults.length} successful retries into chunks...`);
+        const retryChunks: ChunkData[] = [];
+        
+        for (const note of retryResults) {
+          try {
+            const plainText = htmlToPlainText(note.content || "");
+            const fullText = `${note.title}\n\n${plainText}`;
+            const chunks = await createChunks(fullText);
+            
+            chunks.forEach((chunkContent, index) => {
+              retryChunks.push({
+                title: note.title,
+                content: plainText,
+                creation_date: note.creation_date,
+                modification_date: note.modification_date,
+                chunk_index: index.toString(),
+                total_chunks: chunks.length.toString(),
+                chunk_content: chunkContent,
+                cluster_id: "",
+                cluster_label: "",
+                cluster_confidence: "",
+                cluster_summary: "",
+                last_clustered: "",
+              });
+            });
+            
+            totalProcessed++;
+            console.log(`     📝 "${note.title}" → ${chunks.length} chunks (retry success)`);
+          } catch (error) {
+            console.log(`     ❌ Failed to chunk retry "${note.title}": ${(error as Error).message}`);
+            totalFailed++;
+          }
+        }
+        
+        // Write retry chunks to database
+        if (retryChunks.length > 0) {
+          console.log(`   💾 Writing ${retryChunks.length} retry chunks to database...`);
+          
+          for (let j = 0; j < retryChunks.length; j += DB_BATCH_SIZE) {
+            const chunkBatch = retryChunks.slice(j, j + DB_BATCH_SIZE);
+            try {
+              await notesTable.add(chunkBatch);
+              console.log(`     ✅ Wrote ${chunkBatch.length} retry chunks to database`);
+            } catch (error) {
+              console.error(`     ❌ Failed to write retry chunk batch:`, error);
+              throw error;
+            }
+          }
+          
+          totalChunks += retryChunks.length;
+          const currentRowCount = await notesTable.countRows();
+          console.log(`   🔍 Database now has ${currentRowCount} total rows (+${retryChunks.length} from retries)`);
+        }
+      }
+      
+      // Update the list for next retry round
+      timedOutNotes.length = 0;
+      timedOutNotes.push(...stillTimedOut);
+      
+      if (retryResults.length > 0) {
+        console.log(`✅ Retry round ${retryRound + 1} complete: ${retryResults.length} notes recovered, ${stillTimedOut.length} still timing out`);
+      }
+    }
+    
+    // Final timeout summary
+    if (timedOutNotes.length > 0) {
+      console.log(`\n⚠️ Final timeouts: ${timedOutNotes.length} notes could not be processed even with extended timeouts`);
+      timedOutNotes.forEach(note => {
+        console.log(`   ⏰ "${note.title}" - failed after ${maxRetries + 1} attempts (5min → 7.5min → 10min)`);
+      });
+    }
   }
   
   // Final verification - check if database grew by expected amount
@@ -1840,11 +2013,22 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   if (skippedCount > 0) {
     console.log(`⏩ Skipped ${skippedCount} unchanged notes (incremental mode)`);
   }
+  if (totalRetries > 0) {
+    console.log(`🔄 Retries: ${totalRetries} notes recovered through retry with longer timeouts`);
+  }
+  if (timedOutNotes.length > 0) {
+    console.log(`⏰ Final timeouts: ${timedOutNotes.length} notes permanently timed out (tried 5min → 7.5min → 10min)`);
+  }
+  if (totalFailed > 0) {
+    console.log(`❌ Failed: ${totalFailed} notes failed to process due to errors`);
+  }
   
   return { 
     processed: totalProcessed, 
     totalChunks, 
     failed: totalFailed, 
+    retries: totalRetries,
+    finalTimeouts: timedOutNotes.length,
     skipped: skippedCount, 
     timeSeconds: totalTime 
   };
