@@ -1748,12 +1748,24 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
               _fetchDuration: duration
             };
           } else {
-            console.log(`     ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}" (${duration.toFixed(1)}s)`);
+            // Check if this was likely a timeout (took close to 5 minute timeout)
+            if (duration >= 299) { // Close to 300 second timeout
+              console.log(`     ⏰ [${batchNum}.${index + 1}] Likely timeout: "${title}" (${duration.toFixed(1)}s, will retry)`);
+              timedOutNotes.push({
+                title,
+                creation_date,
+                modification_date,
+                attempt: 1
+              });
+              totalTimeouts++;
+            } else {
+              console.log(`     ⚠️ [${batchNum}.${index + 1}] Empty result: "${title}" (${duration.toFixed(1)}s)`);
+            }
           }
           return null;
         } catch (error) {
           const errorMsg = (error as Error).message;
-          if (errorMsg.includes('timeout')) {
+          if (errorMsg.includes('timeout') || errorMsg.includes('Timeout')) {
             console.log(`     ⏰ [${batchNum}.${index + 1}] Timeout: "${title}" (will retry later with longer timeout after 5min)`);
             timedOutNotes.push({
               title,
@@ -1862,8 +1874,12 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   }
   
   // Step 3d: Retry timed-out notes with progressively longer timeouts
+  console.log(`\n🔍 Timeout Summary: ${timedOutNotes.length} notes timed out during batch processing`);
   if (timedOutNotes.length > 0) {
     console.log(`\n🔄 Retrying ${timedOutNotes.length} timed-out notes with longer timeouts...`);
+    timedOutNotes.forEach((note, i) => {
+      console.log(`   ${i + 1}. "${note.title}" (attempt ${note.attempt})`);
+    });
     
     const maxRetries = 2; // Try up to 2 additional times
     const timeoutMultipliers = [1.5, 2]; // 7.5min, then 10min
