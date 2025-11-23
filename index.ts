@@ -16,7 +16,7 @@ import {
   LanceSchema,
   register,
 } from "@lancedb/lancedb/embedding";
-import { type Float, Float32, Utf8 } from "apache-arrow";
+import { type Float, Float32, Utf8, FixedSizeList, Field } from "apache-arrow";
 import { pipeline as hfPipeline } from "@huggingface/transformers";
 
 // Install with: bun add hdbscan-ts
@@ -97,6 +97,30 @@ const saveNotesCache = async (notes: NoteMetadata[]): Promise<void> => {
   } catch (error) {
     console.log(`⚠️ Failed to save cache file: ${(error as Error).message}`);
   }
+};
+
+// Helper to merge new notes with existing cache (for incremental updates)
+const mergeNotesForCache = (newNotes: NoteMetadata[], existingCachedNotes: NoteMetadata[]): NoteMetadata[] => {
+  // Create a map of existing notes by unique key (title + creation_date)
+  const existingMap = new Map<string, NoteMetadata>();
+  existingCachedNotes.forEach(note => {
+    const key = `${note.title}|||${note.creation_date}`;
+    existingMap.set(key, note);
+  });
+  
+  // Add or update with new notes
+  newNotes.forEach(note => {
+    const key = `${note.title}|||${note.creation_date}`;
+    existingMap.set(key, note); // This will update if exists, or add if new
+  });
+  
+  // Convert back to array and sort by modification date (newest first)
+  const mergedNotes = Array.from(existingMap.values());
+  mergedNotes.sort((a, b) => {
+    return new Date(b.modification_date).getTime() - new Date(a.modification_date).getTime();
+  });
+  
+  return mergedNotes;
 };
 
 // Helper to identify new/modified notes
@@ -1104,7 +1128,9 @@ const htmlToPlainText = (html: string): string => {
     .trim();
 };
 
+// Initialize the embedding function first
 const func = new OnDeviceEmbeddingFunction();
+console.log('🤖 Initialized embedding function');
 
 // Updated schema to include chunk information and clustering fields
 const notesTableSchema = LanceSchema({
@@ -1628,12 +1654,52 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   if (mode === 'incremental') {
     console.log('\nStep 2: Comparing with cached notes to find changes...');
     
-    const cachedNotes = await loadNotesCache();
+    let cachedNotesData: NoteMetadata[] = [];
     
-    if (cachedNotes) {
-      console.log(`📂 Found cache with ${cachedNotes.notes.length} notes from ${cachedNotes.last_sync}`);
+    // Use database as source of truth instead of external cache file
+    try {
+      console.log(`📂 Loading existing notes from database...`);
       
-      const { newNotes, modifiedNotes, unchangedNotes } = identifyChangedNotes(noteTitles, cachedNotes.notes);
+      // Query all unique notes from database (get one chunk per note to extract metadata)
+      const dbChunks = await notesTable.search("")
+        .limit(100000)
+        .select(["title", "creation_date", "modification_date"])
+        .toArray();
+      
+      // Deduplicate by title + creation_date (since same note can have multiple chunks)
+      const noteMap = new Map<string, NoteMetadata>();
+      dbChunks.forEach(chunk => {
+        const key = `${chunk.title}|||${chunk.creation_date}`;
+        if (!noteMap.has(key)) {
+          noteMap.set(key, {
+            title: chunk.title,
+            creation_date: chunk.creation_date,
+            modification_date: chunk.modification_date
+          });
+        }
+      });
+      
+      cachedNotesData = Array.from(noteMap.values());
+      console.log(`📂 Found ${cachedNotesData.length} existing notes in database`);
+      
+    } catch (dbError) {
+      console.log(`⚠️ Could not load from database: ${(dbError as Error).message}`);
+      console.log(`📂 Trying JSON cache file as fallback...`);
+      
+      // Fallback to JSON cache if database query fails
+      try {
+        const cachedNotes = await loadNotesCache();
+        if (cachedNotes) {
+          cachedNotesData = cachedNotes.notes;
+          console.log(`📂 Found cache with ${cachedNotesData.length} notes from ${cachedNotes.last_sync}`);
+        }
+      } catch (cacheError) {
+        console.log(`ℹ️ No existing cache found, treating all notes as new`);
+      }
+    }
+    
+    if (cachedNotesData.length > 0) {
+      const { newNotes, modifiedNotes, unchangedNotes } = identifyChangedNotes(noteTitles, cachedNotesData);
       
       console.log(`📊 Change analysis:`);
       console.log(`  • New notes: ${newNotes.length}`);
@@ -1655,7 +1721,7 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       if (modifiedNotes.length > 0) {
         console.log(`\n✏️ Modified notes detected:`);
         modifiedNotes.slice(0, 10).forEach((note, idx) => {
-          const cached = cachedNotes.notes.find(c => c.title === note.title);
+          const cached = cachedNotesData.find(c => c.title === note.title);
           console.log(`  ${idx + 1}. "${note.title}"`);
           console.log(`      Created: ${note.creation_date}`);
           console.log(`      Modified: ${cached?.modification_date} → ${note.modification_date}`);
@@ -1837,7 +1903,36 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
         const chunkBatchNum = Math.floor(j / DB_BATCH_SIZE) + 1;
         
         try {
-          await notesTable.add(chunkBatch);
+          console.log(`     🔄 [${chunkBatchNum}/${chunkBatches}] Adding ${chunkBatch.length} chunks...`);
+          
+          // Check if we need manual embeddings due to missing embedding function metadata
+          if ((notesTable as any)._needsManualEmbeddings) {
+            console.log(`     🔧 Using manual embeddings (broken metadata mode)...`);
+            
+            // Generate embeddings manually and convert to Float32Array
+            const processedBatch = await Promise.all(chunkBatch.map(async (chunk) => {
+              const embeddings = await func.computeSourceEmbeddings([chunk.chunk_content]);
+              // Convert to regular Array to avoid "vector.0" schema inference errors
+              // where Float32Array is treated as a struct/object instead of a list
+              return {
+                ...chunk,
+                vector: Array.from(embeddings[0])
+              };
+            }));
+            
+            // DO NOT pass embeddings parameter - we already have the vectors
+            // Passing embeddings causes LanceDB to try to validate against broken metadata
+            await notesTable.add(processedBatch);
+            
+          } else {
+            // Normal automatic mode
+            await notesTable.add(chunkBatch, { 
+              embeddings: {
+                chunk_content: func
+              }
+            });
+          }
+          
           console.log(`     ✅ [${chunkBatchNum}/${chunkBatches}] Wrote ${chunkBatch.length} chunks to database`);
         } catch (error) {
           console.error(`     ❌ [${chunkBatchNum}/${chunkBatches}] Failed to write chunk batch:`, error);
@@ -1858,14 +1953,18 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
     console.log(`✅ Batch ${batchNum}/${totalBatches} complete: ${batchProcessed} notes → ${batchChunks.length} chunks written to database`);
     console.log(`📊 Overall progress: ${totalProcessed}/${notesToProcess.length} notes processed, ${totalChunks} total chunks`);
     
-    // Progressive cache saving - save cache after every few batches to avoid losing progress
+    // Progressive cache saving - save cache after every few batches as backup
     if (batchNum % 5 === 0 || batchNum === totalBatches) {
-      console.log(`   💾 Saving progress to cache (batch ${batchNum}/${totalBatches})...`);
+      console.log(`   💾 Saving progress to backup cache (batch ${batchNum}/${totalBatches})...`);
       try {
-        await saveNotesCache(allNoteTitles);
-        console.log(`   ✅ Cache updated successfully`);
+        // Merge with existing backup cache
+        const existingCache = await loadNotesCache();
+        const existingNotes = existingCache?.notes || [];
+        const mergedNotes = mergeNotesForCache(allNoteTitles, existingNotes);
+        await saveNotesCache(mergedNotes);
+        console.log(`   ✅ Backup cache updated successfully`);
       } catch (error) {
-        console.log(`   ⚠️ Cache save failed: ${(error as Error).message}`);
+        console.log(`   ⚠️ Backup cache save failed (non-critical): ${(error as Error).message}`);
       }
     }
     
@@ -1969,10 +2068,30 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
           for (let j = 0; j < retryChunks.length; j += DB_BATCH_SIZE) {
             const chunkBatch = retryChunks.slice(j, j + DB_BATCH_SIZE);
             try {
-              await notesTable.add(chunkBatch);
+              console.log(`     🔄 Adding ${chunkBatch.length} retry chunks with embedding function...`);
+              
+              if ((notesTable as any)._needsManualEmbeddings) {
+                // Generate embeddings manually for retry batch
+                const processedBatch = await Promise.all(chunkBatch.map(async (chunk) => {
+                  const embeddings = await func.computeSourceEmbeddings([chunk.chunk_content]);
+                  return {
+                    ...chunk,
+                    vector: embeddings[0]
+                  };
+                }));
+                await notesTable.add(processedBatch);
+              } else {
+                await notesTable.add(chunkBatch, { 
+                  embeddings: {
+                    chunk_content: func
+                  }
+                });
+              }
+              
               console.log(`     ✅ Wrote ${chunkBatch.length} retry chunks to database`);
             } catch (error) {
               console.error(`     ❌ Failed to write retry chunk batch:`, error);
+              console.error(`     🔍 Debug info - func:`, typeof func, 'chunkBatch length:', chunkBatch.length);
               throw error;
             }
           }
@@ -2020,8 +2139,16 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   }
   
   // Step 4: Save updated cache
-  console.log(`\nStep 4: Updating notes cache...`);
-  await saveNotesCache(noteTitles);
+  console.log(`\nStep 4: Updating backup cache...`);
+  // Save to JSON cache as backup (database is the source of truth)
+  try {
+    const existingCache = await loadNotesCache();
+    const existingNotes = existingCache?.notes || [];
+    const mergedNotes = mergeNotesForCache(noteTitles, existingNotes);
+    await saveNotesCache(mergedNotes);
+  } catch (error) {
+    console.log(`⚠️ Backup cache save failed (non-critical): ${(error as Error).message}`);
+  }
   
   const totalTime = (performance.now() - start) / 1000;
   
@@ -2072,62 +2199,77 @@ export const createNotesTableSmart = async (overrideName?: string, mode: 'fresh'
   const tableName = overrideName || "notes";
   
   if (mode === 'fresh') {
-    // Fresh start - drop and recreate
-    try {
-      await db.dropTable(tableName);
-      console.log(`🗑️ Dropped existing '${tableName}' table for fresh start`);
-    } catch (error) {
-      console.log(`ℹ️ No existing table to drop`);
-    }
-    
-    const notesTable = await db.createEmptyTable(
-      tableName,
-      notesTableSchema,
-      { mode: "create", existOk: false }
-    );
-    
-    console.log(`✅ Created fresh '${tableName}' table`);
+    try { await db.dropTable(tableName); } catch {}
+    const notesTable = await db.createEmptyTable(tableName, notesTableSchema, { mode: "create", existOk: false });
     await createFTSIndex(notesTable);
     return { notesTable, existingNotes: new Map(), time: performance.now() - start };
-  } else {
-    // Incremental mode - smart updates
-    let notesTable;
-    let existingNotes = new Map();
+  } 
+  
+  // Incremental mode
+  let notesTable;
+  let existingNotes = new Map();
+  let needsRecovery = false;
+
+  try {
+    // Attempt 1: Open normally
+    notesTable = await db.openTable(tableName);
+    
+    // VALIDATION: Try a lightweight read to ensure metadata is valid
+    try {
+      await notesTable.search("").limit(1).toArray();
+      console.log(`📂 Table opened successfully and is readable`);
+    } catch (readErr) {
+      const msg = (readErr as Error).message;
+      if (msg.includes("No embedding functions") || msg.includes("Schema") || msg.includes("vector")) {
+        console.log(`⚠️ Opened table but read failed (${msg}). Triggering recovery.`);
+        needsRecovery = true;
+      } else {
+        throw readErr; // Some other error, re-throw it
+      }
+    }
+
+  } catch (error) {
+    // Open failed completely (e.g. missing metadata file)
+    console.log(`⚠️ Standard open failed: ${(error as Error).message}`);
+    needsRecovery = true;
+  }
+
+  // RECOVERY LOGIC
+  if (needsRecovery) {
+    console.log(`🔧 Executing table recovery...`);
+    console.log(`   The table exists with data but lacks embedding function metadata.`);
+    console.log(`   We'll wrap it with the current embedding function for this session.`);
     
     try {
-      notesTable = await db.openTable(tableName);
-      console.log(`📂 Opened existing '${tableName}' table`);
-      
-      // Load existing notes for comparison
-      console.log(`🔍 Loading existing notes for deduplication...`);
-      const existing = await notesTable.search("").limit(50000).toArray();
-      
-      // Create map: title -> {modification_date, id}
-      existing.forEach(note => {
-        if (note.title) {
-          existingNotes.set(note.title, {
-            modification_date: note.modification_date,
-            // Store the row for potential deletion
-            row: note
-          });
-        }
-      });
-      
-      console.log(`📊 Found ${existingNotes.size} existing notes for comparison`);
-      
-    } catch (error) {
-      // Table doesn't exist, create it
-      notesTable = await db.createEmptyTable(
-        tableName,
-        notesTableSchema,
-        { mode: "create", existOk: false }
-      );
-      console.log(`✅ Created new '${tableName}' table`);
+      // Don't try to change the schema - just wrap the existing table handle with embedding metadata
+      // The table was already opened above, we just need to register the embedding function
+      // Flag this table as needing manual embedding handling
+      (notesTable as any)._needsManualEmbeddings = true;
+      console.log(`✅ Recovery mode enabled. Will use manual embeddings for new data.`);
+    } catch (recErr) {
+      console.error(`\n❌ Recovery setup failed: ${(recErr as Error).message}`);
+      throw new Error(`Recovery failed: ${(recErr as Error).message}. You may need to use --mode=fresh`);
     }
-    
-    await createFTSIndex(notesTable);
-    return { notesTable, existingNotes, time: performance.now() - start };
   }
+
+  // Load existing notes for deduplication
+  try {
+    const existing = await notesTable.search("").limit(50000).toArray();
+    existing.forEach(note => {
+      if (note.title) {
+        existingNotes.set(note.title, {
+          modification_date: note.modification_date,
+          row: note
+        });
+      }
+    });
+    console.log(`📊 Found ${existingNotes.size} existing notes for comparison`);
+  } catch (err) {
+    console.log(`⚠️ Error reading existing data (non-fatal): ${(err as Error).message}`);
+  }
+  
+  await createFTSIndex(notesTable);
+  return { notesTable, existingNotes, time: performance.now() - start };
 };
 
 export const createNotesTable = async (overrideName?: string) => {

@@ -1,5 +1,20 @@
 #!/usr/bin/env bun
 import { createNotesTableSmart, fetchAndIndexAllNotes } from "./index.js";
+import * as readline from 'readline';
+
+function askQuestion(query: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise(resolve => {
+    rl.question(query, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
 
 async function main() {
   console.log("🚀 Enhanced Apple Notes Indexing\n");
@@ -8,19 +23,37 @@ async function main() {
   const args = process.argv.slice(2);
   const maxNotesArg = args.find(arg => arg.startsWith('--max='));
   const modeArg = args.find(arg => arg.startsWith('--mode='));
+  const tableArg = args.find(arg => arg.startsWith('--table='));
   
   const maxNotes = maxNotesArg ? parseInt(maxNotesArg.split('=')[1]) : undefined;
   const mode = (modeArg?.split('=')[1] as 'fresh' | 'incremental') || 'incremental'; // Default to incremental
+  const tableName = tableArg?.split('=')[1] || 'notes'; // Default to 'notes'
+  
+  // Fresh mode confirmation
+  if (mode === 'fresh') {
+    console.log(`⚠️  FRESH MODE WARNING: This will completely reset the database and reprocess all notes.`);
+    console.log(`📝 To confirm, please type "reset database" (without quotes):`);
+    
+    const confirmation = await askQuestion('> ');
+    
+    if (confirmation.trim() !== 'reset database') {
+      console.log(`❌ Confirmation failed. Exiting without making changes.`);
+      process.exit(0);
+    }
+    
+    console.log(`✅ Fresh mode confirmed. Proceeding with database reset...\n`);
+  }
   
   console.log(`📊 Mode: ${mode === 'fresh' ? 'Fresh rebuild' : 'Incremental updates'}`);
   console.log(`🔧 Method: Enhanced (title + creation date) - handles duplicate titles better`);
+  console.log(`📁 Table: ${tableName}`);
   if (maxNotes) {
     console.log(`🎯 Limit: ${maxNotes} notes`);
   }
   
   try {
     console.log("📁 Setting up notes database...");
-    const { notesTable } = await createNotesTableSmart(undefined, mode);
+    const { notesTable } = await createNotesTableSmart(tableName, mode);
     console.log(`✅ Database setup complete`);
     
     console.log("\n📝 Starting enhanced indexing...");
