@@ -2118,9 +2118,14 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
                   const embeddings = await func.computeSourceEmbeddings([chunk.chunk_content]);
                   return {
                     ...chunk,
-                    vector: embeddings[0]
+                    // Convert to regular Array to avoid "vector.0" schema inference errors
+                    // Also use Array.from() to ensure it's a plain JS array, not Float32Array
+                    vector: Array.from(embeddings[0])
                   };
                 }));
+                
+                // IMPORTANT: When manually providing vectors, we must NOT pass the embeddings option
+                // or LanceDB will try to double-process or validating against broken metadata
                 await notesTable.add(processedBatch);
               } else {
                 await notesTable.add(chunkBatch, { 
