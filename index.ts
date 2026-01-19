@@ -1570,10 +1570,37 @@ const getNoteByTitleAndDate = async (title: string, creationDate: string, custom
 };
 
 // Enhanced fetchAndIndexAllNotes function that fetches by title and creation date
-export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, mode: 'fresh' | 'incremental' = 'incremental') => {
+export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, mode: 'fresh' | 'incremental' | 'incremental-since' = 'incremental') => {
   const start = performance.now();
   
   console.log(`Starting notes fetch and indexing${maxNotes ? ` (max: ${maxNotes} notes)` : ''} in ${mode} mode...`);
+
+  // Step 0: For incremental-since mode, determine the threshold date
+  let thresholdDate: number | null = null;
+  if (mode === 'incremental-since') {
+    console.log('📅 determining threshold date for incremental-since mode...');
+    try {
+      const dbChunks = await notesTable.query()
+        .limit(100000)
+        .select(["modification_date"])
+        .toArray();
+      
+      for (const chunk of dbChunks) {
+        const t = new Date(chunk.modification_date).getTime();
+        if (thresholdDate === null || t > thresholdDate) {
+          thresholdDate = t;
+        }
+      }
+      
+      if (thresholdDate !== null) {
+        console.log(`📅 Threshold found: ${new Date(thresholdDate).toLocaleString()} (will stop fetching older notes)`);
+      } else {
+        console.log(`ℹ️ No existing notes found, fetching all.`);
+      }
+    } catch (error) {
+      console.log(`⚠️ Could not determine threshold date: ${(error as Error).message}. Fetching all.`);
+    }
+  }
   
   // Step 1: First fetch all titles, creation dates, and modification dates
   console.log('\nStep 1: Fetching note titles, creation dates, and modification dates...');
@@ -1631,11 +1658,26 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       return JSON.stringify(noteTitles);
     `);
     
-    const batchTitles = JSON.parse(batchTitlesData as string) as Array<{
+    let batchTitles = JSON.parse(batchTitlesData as string) as Array<{
       title: string;
       creation_date: string;
       modification_date: string;
     }>;
+    
+    // For incremental-since mode, check if we've reached older notes
+    if (thresholdDate !== null) {
+      // Find the first note that is older than or equal to the threshold
+      const cutoffIndex = batchTitles.findIndex(n => new Date(n.modification_date).getTime() <= thresholdDate!);
+      
+      if (cutoffIndex !== -1) {
+        console.log(`🛑 Found note overlapping with threshold at index ${cutoffIndex} in batch. Stopping fetch.`);
+        // Take only the new notes
+        batchTitles = batchTitles.slice(0, cutoffIndex);
+        allNoteTitles.push(...batchTitles);
+        console.log(`✅ [${batchNum}/${totalTitleBatches}] Got ${batchTitles.length} titles (truncated)`);
+        break; // Stop fetching more batches
+      }
+    }
     
     allNoteTitles.push(...batchTitles);
     titleProgress = batchEnd;
@@ -1651,8 +1693,8 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
   let notesToProcess: NoteMetadata[] = noteTitles;
   let skippedCount = 0;
   
-  if (mode === 'incremental') {
-    console.log('\nStep 2: Comparing with cached notes to find changes...');
+  if (mode === 'incremental' || mode === 'incremental-since') {
+    console.log(`\nStep 2: Comparing with cached notes to find changes (${mode})...`);
     
     let cachedNotesData: NoteMetadata[] = [];
     
@@ -1661,7 +1703,7 @@ export const fetchAndIndexAllNotes = async (notesTable: any, maxNotes?: number, 
       console.log(`📂 Loading existing notes from database...`);
       
       // Query all unique notes from database (get one chunk per note to extract metadata)
-      const dbChunks = await notesTable.search("")
+      const dbChunks = await notesTable.query()
         .limit(100000)
         .select(["title", "creation_date", "modification_date"])
         .toArray();

@@ -26,7 +26,7 @@ async function main() {
   const tableArg = args.find(arg => arg.startsWith('--table='));
   
   const maxNotes = maxNotesArg ? parseInt(maxNotesArg.split('=')[1]) : undefined;
-  const mode = (modeArg?.split('=')[1] as 'fresh' | 'incremental') || 'incremental'; // Default to incremental
+  const mode = (modeArg?.split('=')[1] as 'fresh' | 'incremental' | 'incremental-since') || 'incremental'; // Default to incremental
   const tableName = tableArg?.split('=')[1] || 'notes'; // Default to 'notes'
   
   // Fresh mode confirmation
@@ -44,7 +44,13 @@ async function main() {
     console.log(`✅ Fresh mode confirmed. Proceeding with database reset...\n`);
   }
   
-  console.log(`📊 Mode: ${mode === 'fresh' ? 'Fresh rebuild' : 'Incremental updates'}`);
+  const modeDescriptions = {
+    'fresh': 'Fresh rebuild',
+    'incremental': 'Incremental updates',
+    'incremental-since': 'Incremental updates (Date-based)'
+  };
+
+  console.log(`📊 Mode: ${modeDescriptions[mode]}`);
   console.log(`🔧 Method: Enhanced (title + creation date) - handles duplicate titles better`);
   console.log(`📁 Table: ${tableName}`);
   if (maxNotes) {
