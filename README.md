@@ -43,12 +43,44 @@ bun install
 ### 1. Index Your Notes (Required First Step)
 
 ```bash
-# Fresh rebuild (full reindex)
-bun cli.ts --mode=fresh --max=1000
+# Incremental update (Default) - Only processes new/modified notes
+bun cli.ts
 
-# Incremental (day-to-day updates)
-bun cli.ts --mode=incremental --max=200
+# Fresh rebuild (full reindex) - Resets DB and processes everything
+bun cli.ts --mode=fresh
 ```
+
+## Indexing Modes
+
+The CLI supports different modes for indexing your notes. By default, it uses **incremental** mode to save time and resources.
+
+### Incremental Mode (Default)
+`bun cli.ts` or `bun cli.ts --mode=incremental`
+
+- **Smart Caching**: Tracks modification dates of notes to only process what has changed.
+- **Efficient**: Skips notes that haven't been modified since the last run.
+- **Fail-safe**: Keeps tracking of successfully processed notes even if the process is interrupted.
+- **Best for**: Daily usage, quick updates after writing a few notes.
+
+### Incremental Since Mode
+`bun cli.ts --mode=incremental-since`
+
+- **Date-Based**: Fetches all notes modified after the latest modification date in the database.
+- **Fastest for Large sets**: Avoids checking metadata for every single note if you haven't synced in a while.
+- **Best for**: Usage after a long period of inactivity or on a new device where you pulled an old database.
+
+### Fresh Mode
+`bun cli.ts --mode=fresh`
+
+- **Complete Reset**: Wipes the existing database and cache.
+- **Full Reindex**: Fetches and embeds every single note from scratch.
+- **Verification**: Asks for confirmation before proceeding to prevent accidental data loss.
+- **Best for**: First run, major updates to embedding model, or if database gets corrupted.
+
+### Configuration
+
+- `--max=<number>`: Limit the number of notes to process (useful for testing). Default: Unlimited.
+- `--table=<name>`: Specify a custom LanceDB table name. Default: `notes`.
 
 ### 2. Interactive Search
 
@@ -92,8 +124,8 @@ bun display-clusters.ts
 Run scripts directly with Bun:
 
 ```bash
-# Index notes
-bun cli.ts --mode=fresh
+# Index notes (Incremental default)
+bun cli.ts
 
 # Search interactively
 bun searchNotes.ts
