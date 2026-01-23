@@ -10,9 +10,8 @@ A [Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-pr
 
 - 🔍 **Semantic Search** — Search over Apple Notes using `bge-small-en-v1.5` on-device embeddings
 - 📊 **Intelligent Chunking** — Automatic semantic chunking with 400-token chunks and 50-token overlap
-- 🎯 **Semantic Clustering** — Two-pass clustering with dynamic quality-aware outlier reassignment
 - 📝 **Full-text Search** — Fallback full-text search for exact matches
-- � **Vector Storage** — Using [LanceDB](https://lancedb.github.io/lancedb/) for fast vector operations
+- 🚀 **Vector Storage** — Using [LanceDB](https://lancedb.github.io/lancedb/) for fast vector operations
 - 🤖 **MCP-Compatible** — Works with Claude Desktop and other MCP-aware assistants
 - 🍎 **Native Integration** — Direct Apple Notes access via JXA
 - 🏃‍♂️ **Fully Local** — No API keys needed, runs entirely on your machine
@@ -89,16 +88,6 @@ The CLI supports different modes for indexing your notes. By default, it uses **
 bun searchNotes.ts
 ```
 
-### 3. Clustering (Optional)
-
-```bash
-# Run semantic clustering
-bun two-pass-clustering-v2.ts
-
-# View results
-bun display-clusters.ts
-```
-
 ## Usage Methods
 
 ### Option 1: Claude Desktop Integration
@@ -129,23 +118,15 @@ bun cli.ts
 
 # Search interactively
 bun searchNotes.ts
-
-# Clustering
-bun two-pass-clustering-v2.ts
-
-# View clusters
-bun display-clusters.ts
 ```
 
 ## Project Structure
 
 | File | Purpose |
 |------|---------|
-| `index.ts` | Core functions: search, clustering, embeddings |
+| `index.ts` | Core functions: search, embeddings |
 | `cli.ts` | Note indexing and database management |
 | `searchNotes.ts` | Interactive search interface |
-| `two-pass-clustering-v2.ts` | Semantic clustering with quality scoring |
-| `display-clusters.ts` | View clustering results |
 | `sync-db-cache.ts` | Diagnostic tool for DB/cache sync |
 
 ## Storage
@@ -153,10 +134,7 @@ bun display-clusters.ts
 - **Database**: `~/.mcp-apple-notes/data` (LanceDB vector store)
 - **Cache**: `~/.mcp-apple-notes/notes-cache.json` (indexed notes backup)
 
-## Detailed Documentation
-
-For comprehensive guides, see:
-- **[CLUSTERING.md](./CLUSTERING.md)** — Deep dive into the clustering algorithm, configuration, and troubleshooting
+## Dried Documentation
 
 ## Troubleshooting
 

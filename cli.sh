@@ -7,6 +7,3 @@
 
 # Might as well sync the cache if needed
 bun sync-db-cache.ts
-
-# # Perform Clustering on the Notes and display them
-bun two-pass-clustering-v2.ts

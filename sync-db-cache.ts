@@ -40,10 +40,11 @@ async function syncDatabaseAndCache() {
       console.log(`      📄 Chunks: ${note.chunks.length}`);
       
       // Show cluster info if available
-      const firstChunk = note.chunks[0];
-      if (firstChunk.cluster_id !== null && firstChunk.cluster_id !== undefined) {
-        console.log(`      🏷️ Cluster: ${firstChunk.cluster_id} (${firstChunk.cluster_label})`);
-      }
+      // Clustering removed
+      // const firstChunk = note.chunks[0];
+      // if (firstChunk.cluster_id !== null && firstChunk.cluster_id !== undefined) {
+      //   console.log(`      🏷️ Cluster: ${firstChunk.cluster_id} (${firstChunk.cluster_label})`);
+      // }
     });
     
     // Check if database matches expectation
@@ -52,28 +53,13 @@ async function syncDatabaseAndCache() {
       console.log("❌ Database has very few notes - indexing may have failed");
       console.log("💡 Solution: Run fresh indexing with proper data validation");
     } else if (uniqueNotes.length >= 90) {
-      console.log("✅ Database has good coverage - clustering should work well");
+      console.log("✅ Database has good coverage");
     } else {
       console.log("⚠️ Database has partial data - may need re-indexing");
     }
     
-    // Check cluster distribution
-    const clusterMap = new Map();
-    allChunks.forEach(chunk => {
-      const clusterId = chunk.cluster_id || 'unclustered';
-      clusterMap.set(clusterId, (clusterMap.get(clusterId) || 0) + 1);
-    });
-    
-    if (clusterMap.size > 1) {
-      console.log("\n🏷️ Cluster distribution:");
-      for (const [clusterId, count] of clusterMap.entries()) {
-        const label = clusterId === 'unclustered' ? 'Unclustered' : 
-                     clusterId === '-1' ? 'Outliers' : `Cluster ${clusterId}`;
-        console.log(`   ${label}: ${count} chunks`);
-      }
-    } else {
-      console.log("\n📌 No clustering has been applied yet");
-    }
+    // Check cluster distribution removed
+    console.log("\n📌 Clustering functionality has been removed");
     
   } catch (error) {
     console.error("❌ Error:", error);
