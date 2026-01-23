@@ -2,15 +2,14 @@
 
 ![MCP Apple Notes](./images/logo.png)
 
-A [Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-protocol) server that enables semantic search, clustering, and RAG (Retrieval Augmented Generation) over your Apple Notes. This allows AI assistants like Claude to search and reference your Apple Notes during conversations.
+A [Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-protocol) server that enables fetching, embedding, and vector storage of your Apple Notes. This allows AI assistants like Claude to access your Apple Notes data efficiently.
 
 ![MCP Apple Notes](./images/demo.png)
 
 ## Features
 
-- 🔍 **Semantic Search** — Search over Apple Notes using `bge-small-en-v1.5` on-device embeddings
+- 🧠 **Device Embeddings** — Generates `bge-small-en-v1.5` embeddings on-device
 - 📊 **Intelligent Chunking** — Automatic semantic chunking with 400-token chunks and 50-token overlap
-- 📝 **Full-text Search** — Fallback full-text search for exact matches
 - 🚀 **Vector Storage** — Using [LanceDB](https://lancedb.github.io/lancedb/) for fast vector operations
 - 🤖 **MCP-Compatible** — Works with Claude Desktop and other MCP-aware assistants
 - 🍎 **Native Integration** — Direct Apple Notes access via JXA
@@ -53,20 +52,25 @@ bun cli.ts --mode=fresh
 
 The CLI supports different modes for indexing your notes. By default, it uses **incremental** mode to save time and resources.
 
-### Incremental Mode (Default)
-`bun cli.ts` or `bun cli.ts --mode=incremental`
+### Incremental Modes
 
+Both incremental strategies share these core features:
 - **Smart Caching**: Tracks modification dates of notes to only process what has changed.
 - **Efficient**: Skips notes that haven't been modified since the last run.
 - **Fail-safe**: Keeps tracking of successfully processed notes even if the process is interrupted.
-- **Best for**: Daily usage, quick updates after writing a few notes.
 
-### Incremental Since Mode
+#### Default Incremental
+`bun cli.ts` or `bun cli.ts --mode=incremental`
+
+- **Usage**: Good for daily usage or when you want to control the batch size.
+- **Specific**: Useful when you want to process a specific number of recent notes (via `--max`).
+
+#### Incremental Since
 `bun cli.ts --mode=incremental-since`
 
 - **Date-Based**: Fetches all notes modified after the latest modification date in the database.
-- **Fastest for Large sets**: Avoids checking metadata for every single note if you haven't synced in a while.
-- **Best for**: Usage after a long period of inactivity or on a new device where you pulled an old database.
+- **Fastest for Large Sets**: Avoids checking metadata for every single note if you haven't synced in a while.
+- **Best for**: Processing all notes since the last run without knowing the exact count.
 
 ### Fresh Mode
 `bun cli.ts --mode=fresh`
@@ -80,13 +84,6 @@ The CLI supports different modes for indexing your notes. By default, it uses **
 
 - `--max=<number>`: Limit the number of notes to process (useful for testing). Default: Unlimited.
 - `--table=<name>`: Specify a custom LanceDB table name. Default: `notes`.
-
-### 2. Interactive Search
-
-```bash
-# Search your notes
-bun searchNotes.ts
-```
 
 ## Usage Methods
 
@@ -106,7 +103,7 @@ bun searchNotes.ts
 }
 ```
 
-3. Restart Claude Desktop and ask: "Index my notes" or "Search my notes for [topic]"
+3. Restart Claude Desktop and ask: "Index my notes"
 
 ### Option 2: Command Line
 
@@ -115,18 +112,14 @@ Run scripts directly with Bun:
 ```bash
 # Index notes (Incremental default)
 bun cli.ts
-
-# Search interactively
-bun searchNotes.ts
 ```
 
 ## Project Structure
 
 | File | Purpose |
 |------|---------|
-| `index.ts` | Core functions: search, embeddings |
+| `index.ts` | Core functions: embeddings |
 | `cli.ts` | Note indexing and database management |
-| `searchNotes.ts` | Interactive search interface |
 | `sync-db-cache.ts` | Diagnostic tool for DB/cache sync |
 
 ## Storage
@@ -150,10 +143,9 @@ tail -n 50 -f ~/Library/Logs/Claude/mcp.log
 - Try `bun cli.ts --mode=fresh --max=100` to test with a small set first
 - Check that Apple Notes.app is running
 
-**Search not working:**
+**Verify data:**
 - Index first: `bun cli.ts --mode=fresh`
 - Verify database exists: `ls ~/.mcp-apple-notes/data`
-
 ## Todos
 
 - [ ] Apple notes returned as HTML → convert to Markdown
@@ -162,9 +154,9 @@ tail -n 50 -f ~/Library/Logs/Claude/mcp.log
 - [ ] Advanced DB queries and purge functionality
 - [x] Storing notes via Claude
 
-## References
-
-- [MCP Protocol](https://modelcontextprotocol.io/)
+**Verify data:**
+- Index first: `bun cli.ts --mode=fresh`
+- Verify database exists: `ls ~/.mcp-apple-notes/data`
 - [LanceDB](https://lancedb.github.io/)
 - [Hugging Face Embeddings](https://huggingface.co/sentence-transformers/bge-small-en-v1.5)
 - Original PR with batching improvements: https://github.com/RafalWilinski/mcp-apple-notes/pull/3
@@ -336,7 +328,7 @@ Detailed Stats: Shows exactly what was added, updated, or skipped
 
 ## Recent Improvements
 
-### Semantic Search & Chunking Enhancements
+### Chunking & Embedding Enhancements
 
 **Better Embedding Model & Processing:**
 - ✅ Upgraded from `all-MiniLM-L6-v2` to `bge-small-en-v1.5` for improved semantic understanding
@@ -361,12 +353,6 @@ Detailed Stats: Shows exactly what was added, updated, or skipped
 - ✅ Optimized batching with progress tracking
 - ✅ Reduced timeouts and delays for faster processing
 - ✅ Memory-efficient chunk creation and storage
-
-**Enhanced Search Capabilities:**
-- ✅ Multi-strategy search combining vector similarity, full-text search, and exact matching
-- ✅ Chunk-level search with note-level result aggregation
-- ✅ Relevance scoring and result ranking
-- ✅ Preview of matching chunk content in search results
 
 ### CLI Improvements
 
@@ -395,18 +381,12 @@ bun run index-notes --mode=fresh --max=500
 
 **Before improvements:**
 - ~0.39 notes/second (9.9 hours for 14k notes)
-- Poor search relevance
 - Full re-processing on every run
 
 **After improvements:**
 - ~0.45 notes/second for new notes
 - 87% skip rate for unchanged notes on incremental runs
-- Significantly improved search quality with semantic chunking
 - ~3-4 minutes to process 100 notes (including chunking)
-
-## Troubleshooting
-
-// ...existing code...
 
 ### Common Issues
 
@@ -414,18 +394,6 @@ bun run index-notes --mode=fresh --max=500
 - First-time indexing is slower due to embedding generation
 - Use `--max=100` to test with a subset of notes first
 - Subsequent runs are much faster with incremental updates
-
-**Search Not Finding Results:**
-- Ensure notes are indexed first: "Index my Apple Notes"
-- Try different search terms or phrases
-- Check that the embedding model downloaded correctly
-
-**Memory Issues:**
-- Large note collections may require chunking
-- The system automatically handles this with 400-token chunks
-- Consider using `--max=N` for very large collections
-
-// ...existing code...
 
 
 === Indexing Complete ===
